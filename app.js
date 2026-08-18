@@ -135,6 +135,20 @@ const BOOKMARKS = [
   controller.enableCollisionDetection = true;
   controller.minimumZoomDistance = MIN_CAM_HEIGHT;
 
+  // Keep the expanded "Data attribution" lightbox unobstructed: #ui (z-index 5)
+  // would otherwise paint above the overlay, which is trapped at z-index 1
+  // inside #cesiumContainer's stacking context. CreditDisplay toggles the
+  // overlay's inline style.display between "block"/"none", so observe that.
+  const lightboxOverlay = viewer.container.querySelector(".cesium-credit-lightbox-overlay");
+  if (lightboxOverlay) {
+    new MutationObserver(function () {
+      document.body.classList.toggle(
+        "attribution-open",
+        lightboxOverlay.style.display === "block"
+      );
+    }).observe(lightboxOverlay, { attributes: true, attributeFilter: ["style"] });
+  }
+
   /* ---------- base imagery (visible in HK Gov mode / when no source loads) ---------- */
 
   async function initImagery() {
@@ -261,18 +275,22 @@ const BOOKMARKS = [
 
   async function activateSource(key, allowFallback) {
     const src = sources[key];
-    if (!src || src.state === "unavailable" || src.state === "loading") return false;
+    if (!src || src.state === "unavailable") return false;
+    // Every request (including re-clicks while another source is still
+    // loading) bumps the sequence, so the user's LAST choice always wins.
     const seq = ++activationSeq;
 
     if (src.state === "idle") {
       src.state = "loading";
       beginBusy();
+      src.loadPromise = createTileset(key).finally(endBusy);
+    }
+    if (src.state === "loading") {
       let tileset;
       try {
-        tileset = await createTileset(key);
+        tileset = await src.loadPromise;
       } catch (err) {
-        endBusy();
-        markUnavailable(key, describeLoadError(err));
+        if (src.state === "loading") markUnavailable(key, describeLoadError(err));
         if (allowFallback) {
           const otherKey = key === "google" ? "hk" : "google";
           if (sources[otherKey].state !== "unavailable") {
@@ -281,18 +299,39 @@ const BOOKMARKS = [
         }
         return false;
       }
-      endBusy();
-      tileset.show = false;
-      scene.primitives.add(tileset);
-      tileset.loadProgress.addEventListener(function (pending, processing) {
-        src.streaming = pending + processing;
-        refreshSpinner();
-      });
-      src.tileset = tileset;
-      src.state = "ready";
+      if (src.state === "loading") {
+        // First awaiter to resume wires the tileset up; concurrent awaiters
+        // see state "ready" and skip this block.
+        tileset.show = false;
+        scene.primitives.add(tileset);
+        tileset.loadProgress.addEventListener(function (pending, processing) {
+          src.streaming = pending + processing;
+          refreshSpinner();
+        });
+        // Surface mid-stream failures (expired key, quota, per-tile 403s)
+        // that happen after the root tileset.json loaded fine.
+        tileset.tileFailed.addEventListener(function (err) {
+          src.tileFailures = (src.tileFailures || 0) + 1;
+          const msg = err && err.message ? String(err.message) : "tile request failed";
+          setNote(
+            key + "-tiles",
+            src.label + " tiles failing (" + src.tileFailures + ") — " +
+              (msg.length > 70 ? msg.slice(0, 70) + "…" : msg)
+          );
+        });
+        tileset.tileLoad.addEventListener(function () {
+          src.tileFailures = 0;
+          setNote(key + "-tiles", null); // transient blip — clear on recovery
+        });
+        src.tileset = tileset;
+        src.state = "ready";
+      }
     }
 
-    if (seq !== activationSeq) return false; // superseded by a newer toggle
+    // Superseded only if a newer activation actually took the scene; when
+    // nothing is active, claim the slot so a successfully loaded source is
+    // never left invisibly hidden.
+    if (seq !== activationSeq && activeKey !== null) return false;
 
     activeKey = key;
     for (const [k, s] of Object.entries(sources)) {
@@ -306,11 +345,11 @@ const BOOKMARKS = [
 
   els.srcGoogle.addEventListener("click", function () {
     els.srcGoogle.blur();
-    if (activeKey !== "google") activateSource("google", false);
+    activateSource("google", false);
   });
   els.srcHk.addEventListener("click", function () {
     els.srcHk.blur();
-    if (activeKey !== "hk") activateSource("hk", false);
+    activateSource("hk", false);
   });
 
   /* ---------- quality selector (live) ---------- */
@@ -378,7 +417,17 @@ const BOOKMARKS = [
         if (Cesium.defined(p)) return p;
       }
     } catch (_) {}
-    return camera.pickEllipsoid(c, Cesium.Ellipsoid.WGS84);
+    const p = camera.pickEllipsoid(c, Cesium.Ellipsoid.WGS84);
+    if (Cesium.defined(p) && !scene.globe.show) {
+      // Globe hidden (Google mode): the bare-WGS84 intersection can be
+      // kilometers away and below the mesh — only trust it at short range,
+      // otherwise auto-orbit would whip around a distant subterranean point.
+      const agl = Math.abs(camera.positionCartographic.height - (groundHeight ?? 0));
+      if (Cesium.Cartesian3.distance(camera.positionWC, p) > Math.max(300, agl * 5)) {
+        return undefined;
+      }
+    }
+    return p;
   }
 
   /* ---------- bookmarks ---------- */
@@ -552,6 +601,7 @@ const BOOKMARKS = [
   /* ---------- soft floor: keep the camera above the mesh ---------- */
 
   let groundHeight; // sampled height of the mesh/terrain beneath the camera
+  let groundSampleCarto = null; // where that sample was taken
   let lastSampleTime = 0;
   const sampleScratch = new Cesium.Cartographic();
 
@@ -561,22 +611,46 @@ const BOOKMARKS = [
     const carto = Cesium.Cartographic.clone(camera.positionCartographic, sampleScratch);
     let h;
     try {
-      if (
-        scene.sampleHeightSupported &&
-        activeKey &&
-        sources[activeKey].state === "ready"
-      ) {
+      const src = activeKey && sources[activeKey];
+      if (src && src.state === "ready" && src.tileset) {
+        // View-independent: samples loaded tiles even when the ground below
+        // is outside the frustum (camera pitched up at the skyline).
+        h = src.tileset.getHeight(carto, scene);
+      }
+      if (h === undefined && scene.sampleHeightSupported) {
         h = scene.sampleHeight(carto);
       }
     } catch (_) {
-      /* sampleHeight can throw before the first frame renders */
+      /* height queries can throw before the first frame renders */
     }
     if (h === undefined && scene.globe.show) {
       try {
         h = scene.globe.getHeight(carto);
       } catch (_) {}
     }
-    groundHeight = h;
+    if (h !== undefined) {
+      groundHeight = h;
+      groundSampleCarto =
+        groundSampleCarto || new Cesium.Cartographic();
+      Cesium.Cartographic.clone(carto, groundSampleCarto);
+    } else if (groundSampleCarto) {
+      // Keep the last known ground height through transient sampling gaps
+      // (tiles still streaming, ground out of view) so the soft floor and
+      // flight speed stay stable — but drop it once the camera has moved
+      // far enough horizontally that it is meaningless.
+      const moved = Cesium.Cartesian3.distance(
+        Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, 0),
+        Cesium.Cartesian3.fromRadians(
+          groundSampleCarto.longitude,
+          groundSampleCarto.latitude,
+          0
+        )
+      );
+      if (moved > 1000) {
+        groundHeight = undefined;
+        groundSampleCarto = null;
+      }
+    }
   }
 
   function enforceFloor(dt) {
