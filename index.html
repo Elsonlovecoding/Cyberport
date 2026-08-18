@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Cyberport 3D — Hong Kong</title>
+  <meta name="description" content="Photorealistic 3D map viewer of Cyberport, Pok Fu Lam, Hong Kong. Real captured geometry streamed as 3D Tiles (Google / Lands Department HKSAR)." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#127961;</text></svg>" />
+  <!-- CesiumJS 1.144 — pinned, official Cesium CDN -->
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.144/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <link href="style.css" rel="stylesheet" />
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <!-- UI overlay. The container ignores pointer events; only controls receive them,
+       so the map stays draggable everywhere and Cesium's credit/attribution area
+       (bottom-left) is never covered. -->
+  <div id="ui">
+    <button id="menuToggle" type="button" aria-label="Toggle controls" aria-expanded="false">&#9776;</button>
+
+    <div id="panel">
+      <div class="row">
+        <span class="label">Source</span>
+        <div class="seg" id="sourceSeg">
+          <button id="srcGoogle" type="button">Google</button>
+          <button id="srcHk" type="button">HK Gov</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label">Quality</span>
+        <div class="seg" id="qualitySeg">
+          <button type="button" data-sse="8">Ultra</button>
+          <button type="button" data-sse="16">High</button>
+          <button type="button" data-sse="32">Fast</button>
+        </div>
+      </div>
+      <div class="row">
+        <button id="streetBtn" type="button" title="Open Google Street View at the point you are looking at">Street level &#8599;</button>
+      </div>
+      <div id="status" role="status" hidden></div>
+      <div id="hint">Drag&nbsp;orbit &middot; WASD+QE&nbsp;fly &middot; Shift&nbsp;fast &middot; B&nbsp;bookmark &middot; O&nbsp;orbit &middot; F&nbsp;fps</div>
+    </div>
+
+    <div id="fps" hidden></div>
+    <div id="spinner" hidden aria-label="Loading tiles"></div>
+    <div id="toast" hidden></div>
+
+    <div id="bookmarkBar" aria-label="Viewpoints"></div>
+
+    <!-- Required attribution (in addition to Cesium's credit container below-left) -->
+    <div id="credit">3D data: Google / Lands Department, HKSAR Govt (CSDI)</div>
+
+    <div id="fatal" hidden></div>
+  </div>
+
+  <noscript>
+    <div class="noscript">Cyberport 3D needs JavaScript enabled.</div>
+  </noscript>
+
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.144/Build/Cesium/Cesium.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

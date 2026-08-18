@@ -1,0 +1,250 @@
+/* Cyberport 3D — minimal dark overlay UI */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0d10; /* no white flash while Cesium boots */
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #e8eaed;
+}
+
+#cesiumContainer {
+  position: fixed;
+  inset: 0;
+}
+
+/* The overlay itself never intercepts the map… */
+#ui {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+/* …only its controls do. */
+#ui button {
+  pointer-events: auto;
+}
+
+#ui button {
+  font: inherit;
+  font-size: 13px;
+  color: #e8eaed;
+  background: rgba(22, 25, 31, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 6px 11px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+#ui button:hover:not(:disabled) {
+  background: rgba(45, 50, 60, 0.9);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+#ui button.active {
+  background: rgba(38, 92, 170, 0.85);
+  border-color: rgba(120, 175, 255, 0.8);
+}
+#ui button:disabled,
+#ui button.unavailable {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* ---------- top-left control panel ---------- */
+
+#panel {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  max-width: 300px;
+  background: rgba(13, 15, 19, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+#panel .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#panel .label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(232, 234, 237, 0.55);
+  width: 52px;
+  flex: none;
+}
+
+.seg {
+  display: inline-flex;
+  gap: 4px;
+}
+
+#status {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #ffcc66;
+  max-width: 270px;
+}
+
+#hint {
+  font-size: 11px;
+  color: rgba(232, 234, 237, 0.42);
+}
+
+/* ---------- mobile menu button ---------- */
+
+#menuToggle {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: none;
+  font-size: 17px;
+  line-height: 1;
+  padding: 8px 12px;
+  z-index: 7;
+}
+
+/* ---------- fps / spinner (top-right) ---------- */
+
+#fps {
+  position: absolute;
+  top: 12px;
+  right: 52px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 8px;
+  background: rgba(13, 15, 19, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+#spinner {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 22px;
+  height: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: rgba(140, 185, 255, 0.95);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---------- bookmark bar (raised above Cesium's credit line) ---------- */
+
+#bookmarkBar {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 46px; /* keeps Cesium's credit/attribution strip clear */
+  display: flex;
+  gap: 6px;
+  max-width: min(94vw, 720px);
+  overflow-x: auto;
+  padding: 4px;
+  scrollbar-width: none;
+  pointer-events: auto;
+}
+#bookmarkBar::-webkit-scrollbar {
+  display: none;
+}
+#bookmarkBar button {
+  white-space: nowrap;
+}
+
+/* ---------- attribution / status extras ---------- */
+
+/* Our extra credit line sits bottom-right so it can never cover Cesium's
+   credit container (bottom-left), where Google/LandsD attribution renders. */
+#credit {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.72);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+#toast {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 96px;
+  font-size: 13px;
+  padding: 8px 14px;
+  background: rgba(13, 15, 19, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  max-width: 88vw;
+  text-align: center;
+}
+
+#fatal,
+.noscript {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  font-size: 15px;
+  line-height: 1.6;
+  background: #0b0d10;
+  color: #e8eaed;
+  pointer-events: auto;
+  z-index: 20;
+}
+#fatal[hidden] {
+  display: none;
+}
+
+/* ---------- mobile ---------- */
+
+@media (max-width: 719px) {
+  #menuToggle {
+    display: block;
+  }
+  #panel {
+    display: none;
+    top: 54px;
+  }
+  body.panel-open #panel {
+    display: flex;
+  }
+  #fps {
+    top: 56px;
+    right: 12px;
+  }
+  #spinner {
+    top: 14px;
+  }
+  #bookmarkBar {
+    bottom: 52px;
+    max-width: 96vw;
+  }
+  #credit {
+    font-size: 10px;
+  }
+}
