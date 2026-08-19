@@ -283,7 +283,8 @@ const BOOKMARKS = [
     }
     if (instances.length === 0) throw new Error("building data empty");
     viewer.creditDisplay.addStaticCredit(
-      new Cesium.Credit("Building data © OpenStreetMap contributors (ODbL)")
+      // showOnScreen: ODbL attribution must be visible, not just in the lightbox
+      new Cesium.Credit("© OpenStreetMap contributors", true)
     );
     return new Cesium.Primitive({
       geometryInstances: instances,

@@ -125,7 +125,7 @@ The bookmark bar is seeded with five placeholder viewpoints ("Hero",
   hidden or covered** — this is a condition of using Google Photorealistic 3D
   Tiles.
 - The fixed credit line in the UI — *"3D data: Google / Lands Department,
-  HKSAR Govt (CSDI)"* — must also remain.
+  HKSAR Govt (CSDI) / © OpenStreetMap contributors"* — must also remain.
 
 Data sources:
 
