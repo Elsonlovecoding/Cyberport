@@ -1,10 +1,9 @@
 /* Downloads real aerial photography of the Cyberport area from the HK
    Government's open, keyless Imagery Map API (geodata.gov.hk) and stores a
    small web-mercator tile pyramid in data/imagery/ for the viewer's keyless
-   "Open 3D" source. PNG tiles are recompressed to JPEG to keep the repo lean.
-   Run by .github/workflows/fetch-osm-data.yml — not needed at runtime. */
-import { mkdirSync, writeFileSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+   "Open 3D" source. Run by .github/workflows/fetch-osm-data.yml — not
+   needed at runtime. */
+import { mkdirSync, writeFileSync } from "node:fs";
 
 const BBOX = { west: 114.115, south: 22.248, east: 114.145, north: 22.274 };
 const MIN_Z = 12;
@@ -92,18 +91,11 @@ async function worker() {
     }
     const dir = `data/imagery/${z}/${x}`;
     mkdirSync(dir, { recursive: true });
-    const pngPath = `${dir}/${y}.tmp.png`;
-    const jpgPath = `${dir}/${y}.jpg`;
-    writeFileSync(pngPath, buf);
-    // ffmpeg ships on GitHub runners (ImageMagick no longer does); -q:v 4
-    // is roughly JPEG quality ~80.
-    execFileSync(
-      "ffmpeg",
-      ["-y", "-loglevel", "error", "-i", pngPath, "-q:v", "4", jpgPath],
-      { stdio: "ignore" }
-    );
-    execFileSync("rm", [pngPath]);
-    bytes += statSync(jpgPath).size;
+    // Stored exactly as served — no recompression, no system dependencies
+    // (runner images have neither ImageMagick nor ffmpeg preinstalled).
+    const tilePath = `${dir}/${y}.png`;
+    writeFileSync(tilePath, buf);
+    bytes += buf.length;
     fetched++;
   }
 }
@@ -121,7 +113,7 @@ writeFileSync(
   "data/imagery/manifest.json",
   JSON.stringify({
     attribution: ATTRIBUTION,
-    template: "data/imagery/{z}/{x}/{y}.jpg",
+    template: "data/imagery/{z}/{x}/{y}.png",
     west: BBOX.west,
     south: BBOX.south,
     east: BBOX.east,
