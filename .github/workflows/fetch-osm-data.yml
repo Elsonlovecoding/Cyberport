@@ -54,6 +54,9 @@ jobs:
       - name: Build compact extract
         run: node scripts/build-osm-data.mjs osm-raw.json
 
+      - name: Install ImageMagick (PNG -> JPEG recompression)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
+
       - name: Fetch HK Gov aerial imagery tiles
         run: node scripts/fetch-imagery.mjs
 
