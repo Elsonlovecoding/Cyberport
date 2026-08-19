@@ -140,6 +140,11 @@ const BOOKMARKS = [
   controller.minimumZoomDistance = MIN_CAM_HEIGHT;
   // Deep-sea slate wherever no imagery has loaded (keyless/offline ground).
   scene.globe.baseColor = Cesium.Color.fromCssColorString("#16222e");
+  // Fixed mid-afternoon Hong Kong sun for pleasant, consistent lighting and
+  // shadows (the clock never animates in this app).
+  viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-08-19T06:30:00Z");
+  viewer.shadowMap.size = 2048;
+  scene.globe.shadows = Cesium.ShadowMode.RECEIVE_ONLY;
 
   // Keep the expanded "Data attribution" lightbox unobstructed: #ui (z-index 5)
   // would otherwise paint above the overlay, which is trapped at z-index 1
@@ -172,6 +177,29 @@ const BOOKMARKS = [
         url: "https://tile.openstreetmap.org/",
       })
     );
+  }
+
+  // Real aerial photography of the Cyberport area, bundled in the repo from
+  // the HK Government's open Imagery Map API (see scripts/fetch-imagery.mjs).
+  // Draped on top of the world base imagery; skipped silently if absent.
+  async function initLocalAerial() {
+    try {
+      const resp = await fetch("data/imagery/manifest.json");
+      if (!resp.ok) return;
+      const m = await resp.json();
+      viewer.imageryLayers.addImageryProvider(
+        new Cesium.UrlTemplateImageryProvider({
+          url: m.template,
+          tilingScheme: new Cesium.WebMercatorTilingScheme(),
+          rectangle: Cesium.Rectangle.fromDegrees(m.west, m.south, m.east, m.north),
+          minimumLevel: m.minZoom,
+          maximumLevel: m.maxZoom,
+          credit: new Cesium.Credit(m.attribution, true),
+        })
+      );
+    } catch (_) {
+      /* no bundled imagery — the base layer still shows */
+    }
   }
 
   /* ---------- loading spinner ---------- */
@@ -243,12 +271,16 @@ const BOOKMARKS = [
   }
 
   function buildingColor(b) {
-    // Subtle deterministic variation: taller buildings a touch cooler/darker,
-    // neighbours never identical.
-    const t = Math.min(b.h / 120, 1);
-    const jitter = (Math.abs(Math.sin(b.p[0][0] * 4321.7 + b.p[0][1] * 1234.3)) - 0.5) * 0.08;
-    const base = 0.8 - t * 0.22 + jitter;
-    return new Cesium.Color(base, base + 0.012 + t * 0.02, base + 0.03 + t * 0.06, 1);
+    // Deterministic variation: low-rise reads as warm concrete, high-rise as
+    // cooler curtain-wall glass; neighbours never identical.
+    const jitter = (Math.abs(Math.sin(b.p[0][0] * 4321.7 + b.p[0][1] * 1234.3)) - 0.5) * 0.09;
+    if (b.h > 90) {
+      const base = 0.6 + jitter;
+      return new Cesium.Color(base, base + 0.05, base + 0.11, 1);
+    }
+    const t = Math.min(b.h / 90, 1);
+    const base = 0.82 - t * 0.16 + jitter;
+    return new Cesium.Color(base, base - 0.012, base - 0.035, 1);
   }
 
   async function createOsmBuildings() {
@@ -289,6 +321,7 @@ const BOOKMARKS = [
     return new Cesium.Primitive({
       geometryInstances: instances,
       appearance: new Cesium.PerInstanceColorAppearance({ closed: true, translucent: false }),
+      shadows: Cesium.ShadowMode.ENABLED,
       asynchronous: true,
       allowPicking: false,
     });
@@ -337,6 +370,9 @@ const BOOKMARKS = [
     const googleMode = key === "google";
     scene.globe.show = !googleMode;
     if (scene.skyAtmosphere) scene.skyAtmosphere.show = !googleMode;
+    // Sun shadows only for the extruded Open 3D buildings — the photoreal
+    // tilesets have real lighting baked into their textures.
+    viewer.shadows = key === "osm";
   }
 
   function nextFallback(afterKey) {
@@ -829,7 +865,7 @@ const BOOKMARKS = [
     if (!hasHkKey) markUnavailable("hk", "API key missing");
     updateSourceButtons();
     applyMode(null);
-    initImagery();
+    initImagery().then(initLocalAerial); // aerial layer drapes above the base
 
     let flown = false;
     const startFlyIn = function () {
