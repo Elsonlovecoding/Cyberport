@@ -40,6 +40,7 @@ const BOOKMARKS = [
     menuToggle: $("menuToggle"),
     srcGoogle: $("srcGoogle"),
     srcHk: $("srcHk"),
+    srcOsm: $("srcOsm"),
     qualitySeg: $("qualitySeg"),
     streetBtn: $("streetBtn"),
     status: $("status"),
@@ -137,6 +138,8 @@ const BOOKMARKS = [
   scene.postProcessStages.fxaa.enabled = false; // no post-processing
   controller.enableCollisionDetection = true;
   controller.minimumZoomDistance = MIN_CAM_HEIGHT;
+  // Deep-sea slate wherever no imagery has loaded (keyless/offline ground).
+  scene.globe.baseColor = Cesium.Color.fromCssColorString("#16222e");
 
   // Keep the expanded "Data attribution" lightbox unobstructed: #ui (z-index 5)
   // would otherwise paint above the overlay, which is trapped at z-index 1
@@ -216,7 +219,17 @@ const BOOKMARKS = [
       state: "idle",
       streaming: 0,
     },
+    // Keyless source: real OpenStreetMap building geometry bundled in the
+    // repo (data/cyberport-buildings.json), extruded client-side.
+    osm: {
+      label: "Open 3D",
+      btn: els.srcOsm,
+      primitive: null,
+      state: "idle",
+      streaming: 0,
+    },
   };
+  const FALLBACK_ORDER = ["google", "hk", "osm"];
   let activeKey = null;
   let activationSeq = 0;
 
@@ -227,6 +240,57 @@ const BOOKMARKS = [
       // Native camera-vs-mesh collision (works with enableCollisionDetection).
       enableCollision: true,
     };
+  }
+
+  function buildingColor(b) {
+    // Subtle deterministic variation: taller buildings a touch cooler/darker,
+    // neighbours never identical.
+    const t = Math.min(b.h / 120, 1);
+    const jitter = (Math.abs(Math.sin(b.p[0][0] * 4321.7 + b.p[0][1] * 1234.3)) - 0.5) * 0.08;
+    const base = 0.8 - t * 0.22 + jitter;
+    return new Cesium.Color(base, base + 0.012 + t * 0.02, base + 0.03 + t * 0.06, 1);
+  }
+
+  async function createOsmBuildings() {
+    const resp = await fetch("data/cyberport-buildings.json");
+    if (!resp.ok) {
+      throw new Error("building data missing (HTTP " + resp.status + ")");
+    }
+    const data = await resp.json();
+    const instances = [];
+    for (const b of data.buildings || []) {
+      const flat = [];
+      for (const pt of b.p) flat.push(pt[0], pt[1]);
+      try {
+        instances.push(
+          new Cesium.GeometryInstance({
+            geometry: new Cesium.PolygonGeometry({
+              polygonHierarchy: new Cesium.PolygonHierarchy(
+                Cesium.Cartesian3.fromDegreesArray(flat)
+              ),
+              height: 0,
+              extrudedHeight: b.h,
+              vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
+            }),
+            attributes: {
+              color: Cesium.ColorGeometryInstanceAttribute.fromColor(buildingColor(b)),
+            },
+          })
+        );
+      } catch (_) {
+        /* skip a degenerate footprint */
+      }
+    }
+    if (instances.length === 0) throw new Error("building data empty");
+    viewer.creditDisplay.addStaticCredit(
+      new Cesium.Credit("Building data © OpenStreetMap contributors (ODbL)")
+    );
+    return new Cesium.Primitive({
+      geometryInstances: instances,
+      appearance: new Cesium.PerInstanceColorAppearance({ closed: true, translucent: false }),
+      asynchronous: true,
+      allowPicking: false,
+    });
   }
 
   function createTileset(key) {
@@ -268,10 +332,17 @@ const BOOKMARKS = [
 
   function applyMode(key) {
     // Google's tileset includes its own terrain, so the globe is hidden there;
-    // the HK dataset covers Hong Kong only, so the imagery globe stays visible.
+    // the HK and Open 3D data cover Hong Kong only, so the globe stays visible.
     const googleMode = key === "google";
     scene.globe.show = !googleMode;
     if (scene.skyAtmosphere) scene.skyAtmosphere.show = !googleMode;
+  }
+
+  function nextFallback(afterKey) {
+    for (const k of FALLBACK_ORDER) {
+      if (k !== afterKey && sources[k].state !== "unavailable") return k;
+    }
+    return null;
   }
 
   function updateSourceButtons() {
@@ -291,47 +362,53 @@ const BOOKMARKS = [
     if (src.state === "idle") {
       src.state = "loading";
       beginBusy();
-      src.loadPromise = createTileset(key).finally(endBusy);
+      src.loadPromise = (key === "osm" ? createOsmBuildings() : createTileset(key)).finally(
+        endBusy
+      );
     }
     if (src.state === "loading") {
-      let tileset;
+      let content;
       try {
-        tileset = await src.loadPromise;
+        content = await src.loadPromise;
       } catch (err) {
         if (src.state === "loading") markUnavailable(key, describeLoadError(err));
         if (allowFallback) {
-          const otherKey = key === "google" ? "hk" : "google";
-          if (sources[otherKey].state !== "unavailable") {
-            return activateSource(otherKey, false);
-          }
+          const nk = nextFallback(key);
+          if (nk) return activateSource(nk, true); // each failure marks
+          // its source unavailable, so the chain always terminates
         }
         return false;
       }
       if (src.state === "loading") {
-        // First awaiter to resume wires the tileset up; concurrent awaiters
+        // First awaiter to resume wires the content up; concurrent awaiters
         // see state "ready" and skip this block.
-        tileset.show = false;
-        scene.primitives.add(tileset);
-        tileset.loadProgress.addEventListener(function (pending, processing) {
-          src.streaming = pending + processing;
-          refreshSpinner();
-        });
-        // Surface mid-stream failures (expired key, quota, per-tile 403s)
-        // that happen after the root tileset.json loaded fine.
-        tileset.tileFailed.addEventListener(function (err) {
-          src.tileFailures = (src.tileFailures || 0) + 1;
-          const msg = err && err.message ? String(err.message) : "tile request failed";
-          setNote(
-            key + "-tiles",
-            src.label + " tiles failing (" + src.tileFailures + ") — " +
-              (msg.length > 70 ? msg.slice(0, 70) + "…" : msg)
-          );
-        });
-        tileset.tileLoad.addEventListener(function () {
-          src.tileFailures = 0;
-          setNote(key + "-tiles", null); // transient blip — clear on recovery
-        });
-        src.tileset = tileset;
+        content.show = false;
+        scene.primitives.add(content);
+        if (key === "osm") {
+          src.primitive = content;
+        } else {
+          const tileset = content;
+          tileset.loadProgress.addEventListener(function (pending, processing) {
+            src.streaming = pending + processing;
+            refreshSpinner();
+          });
+          // Surface mid-stream failures (expired key, quota, per-tile 403s)
+          // that happen after the root tileset.json loaded fine.
+          tileset.tileFailed.addEventListener(function (err) {
+            src.tileFailures = (src.tileFailures || 0) + 1;
+            const msg = err && err.message ? String(err.message) : "tile request failed";
+            setNote(
+              key + "-tiles",
+              src.label + " tiles failing (" + src.tileFailures + ") — " +
+                (msg.length > 70 ? msg.slice(0, 70) + "…" : msg)
+            );
+          });
+          tileset.tileLoad.addEventListener(function () {
+            src.tileFailures = 0;
+            setNote(key + "-tiles", null); // transient blip — clear on recovery
+          });
+          src.tileset = tileset;
+        }
         src.state = "ready";
       }
     }
@@ -343,7 +420,8 @@ const BOOKMARKS = [
 
     activeKey = key;
     for (const [k, s] of Object.entries(sources)) {
-      if (s.tileset) s.tileset.show = k === key;
+      const display = s.tileset || s.primitive;
+      if (display) display.show = k === key;
     }
     applyMode(key);
     updateSourceButtons();
@@ -358,6 +436,10 @@ const BOOKMARKS = [
   els.srcHk.addEventListener("click", function () {
     els.srcHk.blur();
     activateSource("hk", false);
+  });
+  els.srcOsm.addEventListener("click", function () {
+    els.srcOsm.blur();
+    activateSource("osm", false);
   });
 
   /* ---------- quality selector (live) ---------- */
@@ -757,17 +839,11 @@ const BOOKMARKS = [
     // Don't hold the intro hostage to a slow tileset handshake.
     const flyTimer = setTimeout(startFlyIn, 2500);
 
-    const preferred =
-      sources.google.state !== "unavailable"
-        ? "google"
-        : sources.hk.state !== "unavailable"
-          ? "hk"
-          : null;
-    if (preferred) {
-      await activateSource(preferred, true);
-    } else {
-      setNote("app", "No data source configured — paste your keys at the top of app.js");
+    const preferred = nextFallback(null) || "osm";
+    if (preferred === "osm") {
+      setNote("app", "Keyless Open 3D mode — paste a key in app.js for photorealistic tiles");
     }
+    await activateSource(preferred, true);
     clearTimeout(flyTimer);
     startFlyIn();
   })();

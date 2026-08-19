@@ -56,6 +56,28 @@ function ringFromGeometry(geometry) {
   return pts;
 }
 
+// Overpass `out geom` attaches geometry directly; the plain OSM API map call
+// (the workflow's last-resort source) returns raw refs instead — build the
+// lookup tables needed to resolve those.
+const nodeById = new Map();
+const wayById = new Map();
+for (const el of raw.elements || []) {
+  if (el.type === "node") nodeById.set(el.id, el);
+  else if (el.type === "way") wayById.set(el.id, el);
+}
+
+function resolveWayGeometry(way) {
+  if (Array.isArray(way.geometry)) return way.geometry; // overpass format
+  if (!Array.isArray(way.nodes)) return null;
+  const geometry = [];
+  for (const id of way.nodes) {
+    const node = nodeById.get(id);
+    if (!node) return null; // ref outside the extract
+    geometry.push({ lon: node.lon, lat: node.lat });
+  }
+  return geometry;
+}
+
 const buildings = [];
 let skipped = 0;
 
@@ -65,12 +87,17 @@ for (const el of raw.elements || []) {
 
   const rings = [];
   if (el.type === "way") {
-    const ring = ringFromGeometry(el.geometry);
+    const ring = ringFromGeometry(resolveWayGeometry(el));
     if (ring) rings.push(ring);
   } else if (el.type === "relation" && Array.isArray(el.members)) {
     for (const member of el.members) {
       if (member.role !== "outer") continue;
-      const ring = ringFromGeometry(member.geometry);
+      const geometry = Array.isArray(member.geometry)
+        ? member.geometry
+        : member.type === "way"
+          ? resolveWayGeometry(wayById.get(member.ref) || {})
+          : null;
+      const ring = ringFromGeometry(geometry);
       if (ring) rings.push(ring);
     }
   }

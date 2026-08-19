@@ -20,23 +20,36 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Query Overpass API
+      - name: Query OpenStreetMap
         run: |
           set -euo pipefail
           QUERY='[out:json][timeout:120];(way["building"](22.248,114.115,22.274,114.145);relation["building"](22.248,114.115,22.274,114.145););out geom qt;'
-          for endpoint in \
-            "https://overpass-api.de/api/interpreter" \
-            "https://overpass.kumi.systems/api/interpreter"; do
-            echo "Trying $endpoint"
-            if curl -sS --fail --max-time 180 -d "data=$QUERY" "$endpoint" -o osm-raw.json \
-               && [ "$(wc -c < osm-raw.json)" -gt 10000 ]; then
-              echo "OK: $(wc -c < osm-raw.json) bytes"
-              exit 0
-            fi
-            sleep 5
+          for round in 1 2 3; do
+            for endpoint in \
+              "https://overpass-api.de/api/interpreter" \
+              "https://overpass.kumi.systems/api/interpreter" \
+              "https://overpass.osm.jp/api/interpreter" \
+              "https://overpass.private.coffee/api/interpreter" \
+              "https://maps.mail.ru/osm/tools/overpass/api/interpreter"; do
+              echo "Round $round: trying $endpoint"
+              if curl -sS --fail --max-time 180 -d "data=$QUERY" "$endpoint" -o osm-raw.json \
+                 && [ "$(wc -c < osm-raw.json)" -gt 10000 ]; then
+                echo "OK: $(wc -c < osm-raw.json) bytes from $endpoint"
+                exit 0
+              fi
+              sleep 5
+            done
+            sleep 20
           done
-          echo "All Overpass endpoints failed" >&2
-          exit 1
+          # Last resort: the main OSM API map call (reliable; small bbox is
+          # well within its limits). Raw format — the build script resolves
+          # way->node references itself.
+          echo "Overpass unavailable — falling back to api.openstreetmap.org"
+          curl -sS --fail --max-time 300 \
+            "https://api.openstreetmap.org/api/0.6/map.json?bbox=114.115,22.248,114.145,22.274" \
+            -o osm-raw.json
+          [ "$(wc -c < osm-raw.json)" -gt 10000 ]
+          echo "OK: $(wc -c < osm-raw.json) bytes from api.openstreetmap.org"
 
       - name: Build compact extract
         run: node scripts/build-osm-data.mjs osm-raw.json

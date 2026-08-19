@@ -10,7 +10,8 @@ open it from any static server or host it on GitHub Pages as-is.
 
 The viewer opens with a cinematic fly-in from ~20 km altitude down to Cyberport,
 then lets you orbit, free-fly, and jump between curated viewpoints, switching
-between two photorealistic data sources.
+between three data sources: two photorealistic ones that need a (free) key, and
+a key-free **Open 3D** mode built from real OpenStreetMap building geometry.
 
 ## Paste your two keys
 
@@ -40,6 +41,25 @@ Either key alone is enough to run: if one is missing or its tileset fails to
 load, that source's toggle is disabled with a short status note and the app
 carries on with the working source. Without an ion token, the base imagery under
 the HK data falls back from ion world imagery to OpenStreetMap.
+
+**No keys at all?** The app still shows 3D buildings: it falls back to the
+key-free **Open 3D** source described below. Note there is no key that makes an
+LLM provider (e.g. an Anthropic API key) work here — 3D map tiles only stream
+from map providers.
+
+## The key-free "Open 3D" source
+
+`data/cyberport-buildings.json` is a compact extract of **real OpenStreetMap
+building footprints and heights** around Cyberport (heights come from OSM
+`height`/`building:levels` tags where mapped, conservative defaults otherwise).
+The viewer extrudes them client-side — real building massing, in the spirit of
+Google Earth's classic gray-buildings view, though not the photorealistic
+textured mesh of the two keyed sources.
+
+To refresh the extract, run the **Fetch OSM building data** workflow from the
+repository's Actions tab — it queries the Overpass API and commits the updated
+file. The data is © OpenStreetMap contributors ([ODbL](https://www.openstreetmap.org/copyright));
+the attribution rendered in the credit area must be kept.
 
 ## Run locally
 
@@ -118,6 +138,9 @@ Data sources:
   [CSDI portal](https://portal.csdi.gov.hk/) 3D Map API
   (`data.map.gov.hk`) — follow the CSDI/LandsD terms of use, including
   acknowledging the Lands Department as the data source.
+- **Building data © OpenStreetMap contributors**, licensed
+  [ODbL](https://www.openstreetmap.org/copyright) — used by the Open 3D source
+  (and the OSM raster imagery fallback).
 
 ## Performance notes
 
