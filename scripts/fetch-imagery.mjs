@@ -95,7 +95,13 @@ async function worker() {
     const pngPath = `${dir}/${y}.tmp.png`;
     const jpgPath = `${dir}/${y}.jpg`;
     writeFileSync(pngPath, buf);
-    execFileSync("convert", [pngPath, "-quality", "82", jpgPath]);
+    // ffmpeg ships on GitHub runners (ImageMagick no longer does); -q:v 4
+    // is roughly JPEG quality ~80.
+    execFileSync(
+      "ffmpeg",
+      ["-y", "-loglevel", "error", "-i", pngPath, "-q:v", "4", jpgPath],
+      { stdio: "ignore" }
+    );
     execFileSync("rm", [pngPath]);
     bytes += statSync(jpgPath).size;
     fetched++;
