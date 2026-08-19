@@ -6,6 +6,8 @@
    CONFIG — paste your keys between the quotes, nothing else.
    ============================================================ */
 const CESIUM_ION_TOKEN = "PASTE_HERE"; // https://ion.cesium.com/tokens
+const GOOGLE_MAPS_KEY = "PASTE_HERE";  // optional: Google Maps Platform key (Map Tiles API) —
+                                       // ion-free alternative for the Google source
 const HK_LANDSD_KEY = "PASTE_HERE";    // CSDI 3D Map API key — https://portal.csdi.gov.hk
 
 const START = { lat: 22.2610, lon: 114.1300 }; // Cyberport, Pok Fu Lam (approximate)
@@ -96,6 +98,7 @@ const BOOKMARKS = [
   const isPlaceholder = (v) =>
     typeof v !== "string" || v.trim() === "" || v.includes("PASTE_HERE");
   const hasIonToken = !isPlaceholder(CESIUM_ION_TOKEN);
+  const hasGoogleKey = !isPlaceholder(GOOGLE_MAPS_KEY);
   const hasHkKey = !isPlaceholder(HK_LANDSD_KEY);
   if (hasIonToken) Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
 
@@ -228,8 +231,13 @@ const BOOKMARKS = [
 
   function createTileset(key) {
     if (key === "google") {
-      // No apiOptions: streams via Cesium ion using Ion.defaultAccessToken.
-      return Cesium.createGooglePhotorealistic3DTileset(undefined, tilesetOptions());
+      // We ship no geocoder at all, so the Google-geocoder pairing warning
+      // does not apply; the flag just keeps the console clean.
+      const apiOptions = { onlyUsingWithGoogleGeocoder: true };
+      // With an ion token the tiles stream via Cesium ion; otherwise fall
+      // back to streaming straight from Google's Map Tiles API.
+      if (!hasIonToken && hasGoogleKey) apiOptions.key = GOOGLE_MAPS_KEY;
+      return Cesium.createGooglePhotorealistic3DTileset(apiOptions, tilesetOptions());
     }
     return Cesium.Cesium3DTileset.fromUrl(HK_TILESET_URL, tilesetOptions());
   }
@@ -732,7 +740,9 @@ const BOOKMARKS = [
   }
 
   (async function boot() {
-    if (!hasIonToken) markUnavailable("google", "Cesium ion token missing");
+    if (!hasIonToken && !hasGoogleKey) {
+      markUnavailable("google", "Cesium ion token missing");
+    }
     if (!hasHkKey) markUnavailable("hk", "API key missing");
     updateSourceButtons();
     applyMode(null);

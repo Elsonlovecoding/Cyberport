@@ -18,6 +18,7 @@ Open `app.js` — the config block is at the very top:
 
 ```js
 const CESIUM_ION_TOKEN = "PASTE_HERE"; // https://ion.cesium.com/tokens
+const GOOGLE_MAPS_KEY = "PASTE_HERE";  // optional: Google Maps Platform key (Map Tiles API)
 const HK_LANDSD_KEY = "PASTE_HERE";    // CSDI 3D Map API key — https://portal.csdi.gov.hk
 ```
 
@@ -26,6 +27,10 @@ const HK_LANDSD_KEY = "PASTE_HERE";    // CSDI 3D Map API key — https://portal
   streamed through ion) and the aerial base imagery. If your ion account doesn't
   have *Google Photorealistic 3D Tiles* yet, add it to your assets from the ion
   **Asset Depot** first.
+- **`GOOGLE_MAPS_KEY`** *(optional)* — a
+  [Google Maps Platform](https://developers.google.com/maps/documentation/tile/get-api-key)
+  API key with the **Map Tiles API** enabled. If no ion token is set, the
+  Google source streams directly from Google using this key instead.
 - **`HK_LANDSD_KEY`** — an API key for the Hong Kong
   [CSDI](https://portal.csdi.gov.hk/) **3D Map API** (Lands Department
   *3D Visualisation Map*, served from `data.map.gov.hk`). Apply for a key on the
