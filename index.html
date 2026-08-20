@@ -40,12 +40,38 @@
         <button id="streetBtn" type="button" title="Open Google Street View at the point you are looking at">Street level &#8599;</button>
       </div>
       <div id="status" role="status" hidden></div>
-      <div id="hint">Drag&nbsp;orbit &middot; WASD+QE&nbsp;fly &middot; Shift&nbsp;fast &middot; B&nbsp;bookmark &middot; O&nbsp;orbit &middot; F&nbsp;fps</div>
+      <div id="hint">Drag&nbsp;pan &middot; Right-drag&nbsp;rotate/tilt &middot; Wheel&nbsp;or&nbsp;+/&minus;&nbsp;zoom &middot; Double-click&nbsp;dive &middot; WASD+QE&nbsp;fly (Shift&nbsp;fast) &middot; B&nbsp;bookmark &middot; O&nbsp;orbit &middot; F&nbsp;fps</div>
     </div>
 
     <div id="fps" hidden></div>
     <div id="spinner" hidden aria-label="Loading tiles"></div>
     <div id="toast" hidden></div>
+
+    <!-- On-screen camera controls: hold a button to keep moving -->
+    <div id="navPad" aria-label="Camera controls">
+      <button id="compassBtn" type="button" title="Compass — click to face north">
+        <svg id="compassNeedle" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <polygon points="12,1.5 15.5,12 12,10 8.5,12" fill="#ff6b57"></polygon>
+          <polygon points="12,22.5 8.5,12 12,14 15.5,12" fill="#e8eaed"></polygon>
+        </svg>
+      </button>
+      <div class="pad-grid">
+        <button data-nav="rotl" type="button" title="Rotate left (hold)">&#8634;</button>
+        <button data-nav="fwd" type="button" title="Move forward (hold)">&#9650;</button>
+        <button data-nav="rotr" type="button" title="Rotate right (hold)">&#8635;</button>
+        <button data-nav="left" type="button" title="Move left (hold)">&#9664;</button>
+        <button data-nav="back" type="button" title="Move back (hold)">&#9660;</button>
+        <button data-nav="right" type="button" title="Move right (hold)">&#9654;</button>
+      </div>
+      <div class="pad-row">
+        <button data-nav="tiltup" type="button" title="Tilt toward horizon (hold)">&#8896;</button>
+        <button data-nav="tiltdown" type="button" title="Tilt toward ground (hold)">&#8897;</button>
+      </div>
+      <div class="pad-row">
+        <button data-nav="zoomin" type="button" class="zoom" title="Zoom in (hold)">+</button>
+        <button data-nav="zoomout" type="button" class="zoom" title="Zoom out (hold)">&minus;</button>
+      </div>
+    </div>
 
     <div id="bookmarkBar" aria-label="Viewpoints"></div>
 

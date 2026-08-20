@@ -185,6 +185,68 @@ body.attribution-open #ui {
   white-space: nowrap;
 }
 
+/* ---------- on-screen navigation pad (bottom-right) ---------- */
+
+#navPad {
+  position: absolute;
+  right: 10px;
+  bottom: 88px;
+  right: max(10px, env(safe-area-inset-right));
+  bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 7px;
+  background: rgba(13, 15, 19, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+#navPad button {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 9px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#navPad button.held {
+  background: rgba(38, 92, 170, 0.85);
+  border-color: rgba(120, 175, 255, 0.8);
+}
+#navPad .zoom {
+  font-size: 20px;
+}
+
+#compassBtn {
+  border-radius: 50% !important;
+  width: 38px !important;
+  height: 38px !important;
+}
+#compassNeedle {
+  transition: transform 0.15s linear;
+  will-change: transform;
+}
+
+#navPad .pad-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 36px);
+  gap: 4px;
+}
+#navPad .pad-row {
+  display: flex;
+  gap: 4px;
+}
+
 /* ---------- attribution / status extras ---------- */
 
 /* Our extra credit line sits bottom-right, lifted clear of the bottom strip
@@ -273,6 +335,19 @@ body.attribution-open #ui {
     font-size: 10px;
     bottom: 34px;
     bottom: calc(34px + env(safe-area-inset-bottom, 0px));
+  }
+  #navPad {
+    bottom: 100px;
+    bottom: calc(100px + env(safe-area-inset-bottom, 0px));
+    gap: 4px;
+    padding: 6px;
+  }
+  #navPad button {
+    width: 40px;
+    height: 40px;
+  }
+  #navPad .pad-grid {
+    grid-template-columns: repeat(3, 40px);
   }
 }
 

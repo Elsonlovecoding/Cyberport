@@ -89,7 +89,11 @@ appropriate restrictions/quotas.)
 
 | Input | Action |
 | --- | --- |
-| Mouse / touch | Standard Cesium orbit, pan, zoom |
+| Left-drag / one finger | Pan the map |
+| Mouse wheel / pinch | Zoom in and out |
+| Right-drag (or `Ctrl`+drag) | Rotate and tilt around the point you grabbed |
+| Double-click | Fly halfway toward the clicked point |
+| On-screen pad (bottom-right) | Hold to act: arrows move, `↺ ↻` rotate, `∧ ∨` tilt, `+ −` zoom; the compass shows heading — click it to face north |
 | `W A S D` + `Q E` | Free-fly (forward/left/back/right, down/up), smooth and damped |
 | `Shift` | Fly faster |
 | `B` | Copy the current camera as a bookmark line (see below) |

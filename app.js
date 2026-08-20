@@ -138,6 +138,17 @@ const BOOKMARKS = [
   scene.postProcessStages.fxaa.enabled = false; // no post-processing
   controller.enableCollisionDetection = true;
   controller.minimumZoomDistance = MIN_CAM_HEIGHT;
+
+  // Friendlier mouse mapping (Google Earth-like): left-drag pans, wheel
+  // zooms, RIGHT-drag rotates/tilts around what you grabbed (Cesium's
+  // default right-drag-to-zoom surprises everyone). Ctrl+left-drag too.
+  controller.tiltEventTypes = [
+    Cesium.CameraEventType.RIGHT_DRAG,
+    Cesium.CameraEventType.MIDDLE_DRAG,
+    Cesium.CameraEventType.PINCH,
+    { eventType: Cesium.CameraEventType.LEFT_DRAG, modifier: Cesium.KeyboardEventModifier.CTRL },
+  ];
+  controller.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH];
   // Deep-sea slate wherever no imagery has loaded (keyless/offline ground).
   scene.globe.baseColor = Cesium.Color.fromCssColorString("#16222e");
   // Fixed mid-afternoon Hong Kong sun for pleasant, consistent lighting and
@@ -660,6 +671,157 @@ const BOOKMARKS = [
     viewer.canvas.addEventListener(evt, () => cancelOrbit(false), { passive: true });
   }
 
+  /* ---------- on-screen navigation pad ---------- */
+
+  // pan: [right, forward] (ground plane) · rot: [heading, tilt] rad/s · zoom: ± direction
+  const NAV_ACTIONS = {
+    fwd: { pan: [0, 1] },
+    back: { pan: [0, -1] },
+    left: { pan: [-1, 0] },
+    right: { pan: [1, 0] },
+    rotl: { rot: [-0.9, 0] },
+    rotr: { rot: [0.9, 0] },
+    tiltup: { rot: [0, -0.5] },   // toward the horizon
+    tiltdown: { rot: [0, 0.5] },  // toward the ground
+    zoomin: { zoom: 1 },
+    zoomout: { zoom: -1 },
+  };
+  let activeNav = null;
+
+  for (const btn of document.querySelectorAll("#navPad [data-nav]")) {
+    const start = function (e) {
+      e.preventDefault();
+      camera.cancelFlight();
+      flightState.flying = false;
+      cancelOrbit(true);
+      activeNav = btn.dataset.nav;
+      btn.classList.add("held");
+    };
+    const stop = function () {
+      if (activeNav === btn.dataset.nav) activeNav = null;
+      btn.classList.remove("held");
+    };
+    btn.addEventListener("pointerdown", start);
+    btn.addEventListener("pointerup", stop);
+    btn.addEventListener("pointerleave", stop);
+    btn.addEventListener("pointercancel", stop);
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
+  window.addEventListener("pointerup", function () {
+    activeNav = null;
+    for (const b of document.querySelectorAll("#navPad .held")) b.classList.remove("held");
+  });
+
+  const navUp = new Cesium.Cartesian3();
+  const navTmp = new Cesium.Cartesian3();
+  const navFwd = new Cesium.Cartesian3();
+  const navRight = new Cesium.Cartesian3();
+
+  function updateNav(dt) {
+    if (!activeNav) return;
+    const spec = NAV_ACTIONS[activeNav];
+    if (!spec) return;
+    const agl = Math.max(Math.abs(camera.positionCartographic.height - (groundHeight ?? 0)), 15);
+
+    if (spec.pan) {
+      // Move parallel to the ground, in the direction the view faces,
+      // at a speed that feels the same at rooftop and city scale.
+      const speed = Math.min(Math.max(30, agl * 1.2), 6000);
+      Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(camera.positionWC, navUp);
+      let fwd = Cesium.Cartesian3.subtract(
+        camera.direction,
+        Cesium.Cartesian3.multiplyByScalar(navUp, Cesium.Cartesian3.dot(camera.direction, navUp), navTmp),
+        navFwd
+      );
+      if (Cesium.Cartesian3.magnitudeSquared(fwd) < 1e-8) {
+        // Looking straight down — use the camera's up vector instead.
+        fwd = Cesium.Cartesian3.subtract(
+          camera.up,
+          Cesium.Cartesian3.multiplyByScalar(navUp, Cesium.Cartesian3.dot(camera.up, navUp), navTmp),
+          navFwd
+        );
+      }
+      Cesium.Cartesian3.normalize(fwd, fwd);
+      const right = Cesium.Cartesian3.normalize(Cesium.Cartesian3.cross(fwd, navUp, navRight), navRight);
+      if (spec.pan[1]) camera.move(fwd, spec.pan[1] * speed * dt);
+      if (spec.pan[0]) camera.move(right, spec.pan[0] * speed * dt);
+    }
+
+    if (spec.rot) {
+      // Rotate/tilt around the point at screen center when there is one,
+      // otherwise turn in place.
+      const center = pickCenter();
+      if (Cesium.defined(center)) {
+        camera.lookAtTransform(Cesium.Transforms.eastNorthUpToFixedFrame(center));
+        if (spec.rot[0]) camera.rotateRight(spec.rot[0] * dt);
+        if (spec.rot[1]) camera.rotateUp(spec.rot[1] * dt);
+        camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+      } else {
+        camera.setView({
+          orientation: {
+            heading: camera.heading + spec.rot[0] * dt,
+            pitch: Cesium.Math.clamp(camera.pitch - spec.rot[1] * dt, -1.55, 0.35),
+            roll: 0,
+          },
+        });
+      }
+    }
+
+    if (spec.zoom) {
+      const amount = Math.min(Math.max(20, agl * 1.4), 8000) * dt;
+      if (spec.zoom > 0) camera.zoomIn(amount);
+      else camera.zoomOut(amount);
+    }
+  }
+
+  /* compass: needle tracks the camera; click turns back to north */
+  const compassBtn = $("compassBtn");
+  const compassNeedle = $("compassNeedle");
+  let lastNeedleDeg = 0;
+  compassBtn.addEventListener("click", function () {
+    compassBtn.blur();
+    cancelOrbit(true);
+    camera.cancelFlight();
+    flightState.flying = true;
+    camera.flyTo({
+      destination: Cesium.Cartesian3.clone(camera.positionWC),
+      orientation: { heading: 0, pitch: camera.pitch, roll: 0 },
+      duration: 0.8,
+      complete: function () {
+        flightState.flying = false;
+      },
+      cancel: function () {
+        flightState.flying = false;
+      },
+    });
+  });
+
+  /* double-click: dive halfway toward the point you clicked */
+  viewer.screenSpaceEventHandler.setInputAction(function (movement) {
+    let target;
+    try {
+      if (scene.pickPositionSupported) target = scene.pickPosition(movement.position);
+    } catch (_) {}
+    if (!Cesium.defined(target)) return;
+    const dest = Cesium.Cartesian3.lerp(camera.positionWC, target, 0.5, new Cesium.Cartesian3());
+    const carto = Cesium.Cartographic.fromCartesian(dest);
+    const floor = (groundHeight ?? 0) + MIN_CAM_HEIGHT;
+    if (carto.height < floor) carto.height = floor;
+    cancelOrbit(true);
+    flightState.flying = true;
+    camera.flyTo({
+      destination: Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, carto.height),
+      orientation: { heading: camera.heading, pitch: camera.pitch, roll: 0 },
+      duration: 0.7,
+      complete: function () {
+        flightState.flying = false;
+      },
+      cancel: function () {
+        flightState.flying = false;
+      },
+    });
+  }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
   /* ---------- keyboard: WASD+QE free-fly, B/O/F ---------- */
 
   const MOVE_CODES = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE"]);
@@ -802,6 +964,7 @@ const BOOKMARKS = [
     prevFrameTime = now;
     sampleGround(now);
     updateFlight(dt);
+    updateNav(dt);
     if (orbitActive) camera.rotateRight(ORBIT_RATE * dt);
     enforceFloor(dt);
   });
@@ -811,6 +974,11 @@ const BOOKMARKS = [
   let frameCount = 0;
   let fpsWindowStart = performance.now();
   scene.postRender.addEventListener(function () {
+    const needleDeg = -Math.round(Cesium.Math.toDegrees(camera.heading) * 2) / 2;
+    if (needleDeg !== lastNeedleDeg) {
+      lastNeedleDeg = needleDeg;
+      compassNeedle.style.transform = "rotate(" + needleDeg + "deg)";
+    }
     frameCount += 1;
     const now = performance.now();
     if (now - fpsWindowStart >= 500) {
