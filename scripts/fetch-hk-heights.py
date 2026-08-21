@@ -69,6 +69,51 @@ def pick(found, positive, negative):
     return ranked[0][1] if ranked else None
 
 
+_LERC_FORM = None
+
+
+def decode_lerc(blob):
+    """Decode an Esri LERC blob to a 2-D array.
+
+    The `lerc` package's binding has changed shape across versions, so try
+    the known call forms once, remember which worked, and report clearly.
+    """
+    global _LERC_FORM
+    import lerc  # imported lazily so discovery works without it
+    import numpy as np
+
+    forms = [
+        ("bytes", lambda b: lerc.decode(bytes(b))),
+        ("bytearray", lambda b: lerc.decode(bytearray(b))),
+        ("np_uint8", lambda b: lerc.decode(np.frombuffer(b, dtype=np.uint8))),
+    ]
+    if _LERC_FORM is not None:
+        forms = [f for f in forms if f[0] == _LERC_FORM]
+
+    errors = []
+    for name, fn in forms:
+        try:
+            out = fn(blob)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+            continue
+        data = None
+        for part in out if isinstance(out, tuple) else (out,):
+            if hasattr(part, "shape") and getattr(part, "size", 0) > 1:
+                data = part
+                break
+        if data is None:
+            errors.append(f"{name}: no array in {type(out)}")
+            continue
+        while data.ndim > 2:  # (bands, rows, cols) -> (rows, cols)
+            data = data[0]
+        if _LERC_FORM != name:
+            _LERC_FORM = name
+            print(f"    lerc decode form: {name}, shape={data.shape}, dtype={data.dtype}")
+        return data
+    raise RuntimeError("; ".join(errors))
+
+
 def lonlat_to_merc(lon, lat):
     x = math.radians(lon) * R
     y = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * R
@@ -129,16 +174,7 @@ class Elevation:
             if blob[:1] == b"{":  # error JSON, not a tile
                 arr = None
             else:
-                import lerc  # imported lazily so discovery works without it
-
-                out = lerc.decode(bytearray(blob))
-                # lerc.decode returns (code, nValuesPerPixel, ndarray, ...)
-                data = None
-                for part in out if isinstance(out, tuple) else (out,):
-                    if hasattr(part, "shape"):
-                        data = part
-                        break
-                arr = data
+                arr = decode_lerc(blob)
         except Exception as exc:  # noqa: BLE001
             print(f"    tile {self.lod['level']}/{row}/{col} failed: {exc}")
             arr = None
@@ -189,6 +225,14 @@ def median(xs):
 
 def main():
     buildings = json.load(open("data/cyberport-buildings.json"))["buildings"]
+    try:
+        import lerc
+
+        print(f"lerc module: {getattr(lerc, '__file__', '?')}")
+        print(f"lerc exports: {[n for n in dir(lerc) if not n.startswith('_')][:12]}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"lerc unavailable ({exc}) — cannot measure heights")
+        return 0
     found = discover()
     dsm_url = pick(found, ["surface", "dsm"], ["terrain", "dtm"])
     dtm_url = pick(found, ["terrain", "dtm"], ["surface", "dsm"])
