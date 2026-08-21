@@ -85,14 +85,21 @@ jobs:
       # model. Best effort — the script exits 0 if the services don't answer.
       - name: Measure heights from HK LiDAR (DSM - DTM)
         continue-on-error: true
-        timeout-minutes: 15
-        run: python3 scripts/fetch-hk-heights.py
+        timeout-minutes: 20
+        run: |
+          python3 -m pip install --quiet lerc numpy
+          python3 scripts/fetch-hk-heights.py
 
-      - name: Bake real terrain elevation
+      # Global 30 m fallback: only used if the HK 5 m DTM above didn't write.
+      - name: Bake fallback terrain elevation
         continue-on-error: true
         run: |
           npm install pngjs@7 --no-save --no-audit --no-fund
-          node scripts/fetch-terrain.mjs
+          if [ -f data/terrain.json ]; then
+            echo "HK DTM terrain already written — skipping global fallback."
+          else
+            node scripts/fetch-terrain.mjs
+          fi
 
       - name: Measure real building colours from the orthophoto
         run: |

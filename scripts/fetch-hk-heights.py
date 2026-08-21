@@ -2,105 +2,146 @@
 """Measure real building heights from Hong Kong's 2020 LiDAR survey.
 
 The Lands Department publishes a Digital Surface Model (DSM — includes
-buildings) and a Digital Terrain Model (DTM — bare ground) as open data.
-DSM minus DTM at a building's footprint IS its measured height, so this
-replaces estimates with real observations wherever the services answer.
+buildings) and a Digital Terrain Model (DTM — bare ground) as open data,
+both as cached ArcGIS LERC elevation tiles that need no key. DSM minus DTM
+over a building's footprint IS its measured height.
 
-Discovers the ArcGIS image services at runtime (item ids move between
-releases), samples both models at points inside each footprint, and writes
-hk-heights.json: {"<index>": height_metres}.
+Writes:
+  hk-heights.json  {"<building index>": height_m}
+  data/terrain.json  5 m elevation grid from the DTM (better than the 30 m
+                     global fallback, and consistent with the heights above)
 
-Best effort by design: prints what it finds and exits 0 if the services are
-unavailable, leaving the caller's existing heights untouched.
+Best effort by design: prints what it finds and exits 0 if anything is
+unavailable, leaving existing data untouched.
 """
+import base64
 import json
+import math
+import struct
 import sys
 import urllib.parse
 import urllib.request
 
+BBOX = {"west": 114.115, "south": 22.248, "east": 114.145, "north": 22.274}
+GRID_N = 384
 TIMEOUT = 60
 UA = {"User-Agent": "cyberport-3d-viewer/1.0 (open data height sampling)"}
+R = 6378137.0
 
 
-def get_json(url, data=None):
+def get(url, data=None, raw=False):
     req = urllib.request.Request(url, data=data, headers=UA)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+        body = r.read()
+    return body if raw else json.loads(body.decode("utf-8", "replace"))
 
 
 def discover():
-    """Find candidate DSM/DTM ArcGIS image services."""
     queries = [
         '(title:"Digital Surface Model" OR title:DSM) AND "Hong Kong" AND type:"Image Service"',
         '(title:"Digital Terrain Model" OR title:DTM) AND "Hong Kong" AND type:"Image Service"',
-        '"Hong Kong" LiDAR 2020 AND type:"Image Service"',
     ]
     found = {}
     for q in queries:
-        url = (
-            "https://www.arcgis.com/sharing/rest/search?f=json&num=50&q="
-            + urllib.parse.quote(q)
-        )
+        url = "https://www.arcgis.com/sharing/rest/search?f=json&num=50&q=" + urllib.parse.quote(q)
         try:
-            res = get_json(url)
+            res = get(url)
         except Exception as exc:  # noqa: BLE001
-            print(f"  search failed ({exc}) for: {q}")
+            print(f"  search failed ({exc})")
             continue
         for item in res.get("results", []):
             if item.get("url"):
                 found[item["url"]] = item.get("title", "")
-    print(f"discovered {len(found)} candidate image services:")
-    for url, title in found.items():
-        print(f"  {title}  ->  {url}")
+    print(f"discovered {len(found)} candidate services:")
+    for u, t in found.items():
+        print(f"  {t}  ->  {u}")
     return found
 
 
 def pick(found, positive, negative):
+    # Prefer the 2020 survey at 5 m when several vintages are published.
+    ranked = []
     for url, title in found.items():
         t = title.lower()
         if any(p in t for p in positive) and not any(n in t for n in negative):
-            return url
-    return None
+            ranked.append((0 if "2020" in t else 1, url))
+    ranked.sort()
+    return ranked[0][1] if ranked else None
 
 
-def sample(service, points):
-    """ArcGIS ImageServer getSamples, batched. Returns list of float|None."""
-    out = []
-    BATCH = 250
-    for i in range(0, len(points), BATCH):
-        chunk = points[i : i + BATCH]
-        geom = {
-            "points": [[p[0], p[1]] for p in chunk],
-            "spatialReference": {"wkid": 4326},
-        }
-        body = urllib.parse.urlencode(
-            {
-                "geometry": json.dumps(geom),
-                "geometryType": "esriGeometryMultipoint",
-                "returnFirstValueOnly": "true",
-                "interpolation": "RSP_BilinearInterpolation",
-                "f": "json",
-            }
-        ).encode()
+def lonlat_to_merc(lon, lat):
+    x = math.radians(lon) * R
+    y = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * R
+    return x, y
+
+
+class Elevation:
+    """Reads a cached ArcGIS LERC elevation service over a bbox."""
+
+    def __init__(self, service, name):
+        self.name = name
+        self.service = service.rstrip("/")
+        info = get(self.service + "?f=json")
+        ti = info.get("tileInfo") or {}
+        self.size = ti.get("rows") or 256
+        self.origin = (ti["origin"]["x"], ti["origin"]["y"])
+        lods = ti.get("lods") or []
+        if not lods:
+            raise RuntimeError("no tileInfo.lods")
+        self.lod = max(lods, key=lambda l: l["level"])
+        self.res = self.lod["resolution"]
+        self.fmt = ti.get("format", "?")
+        print(
+            f"  {name}: format={self.fmt} maxLevel={self.lod['level']} "
+            f"res={self.res:.3f} m/px tile={self.size}"
+        )
+        self.tiles = {}
+
+    def _tile(self, col, row):
+        key = (col, row)
+        if key in self.tiles:
+            return self.tiles[key]
+        url = f"{self.service}/tile/{self.lod['level']}/{row}/{col}"
+        arr = None
         try:
-            res = get_json(service.rstrip("/") + "/getSamples", data=body)
+            blob = get(url, raw=True)
+            if blob[:1] == b"{":  # error JSON, not a tile
+                arr = None
+            else:
+                import lerc  # imported lazily so discovery works without it
+
+                out = lerc.decode(bytearray(blob))
+                # lerc.decode returns (code, nValuesPerPixel, ndarray, ...)
+                data = None
+                for part in out if isinstance(out, tuple) else (out,):
+                    if hasattr(part, "shape"):
+                        data = part
+                        break
+                arr = data
         except Exception as exc:  # noqa: BLE001
-            print(f"  getSamples failed: {exc}")
+            print(f"    tile {self.lod['level']}/{row}/{col} failed: {exc}")
+            arr = None
+        self.tiles[key] = arr
+        return arr
+
+    def at(self, lon, lat):
+        mx, my = lonlat_to_merc(lon, lat)
+        wx = (mx - self.origin[0]) / self.res
+        wy = (self.origin[1] - my) / self.res
+        col = int(wx // self.size)
+        row = int(wy // self.size)
+        arr = self._tile(col, row)
+        if arr is None:
             return None
-        if "error" in res:
-            print(f"  getSamples error: {res['error']}")
+        px = int(wx) % self.size
+        py = int(wy) % self.size
+        try:
+            v = float(arr[py][px]) if arr.ndim == 2 else float(arr[0][py][px])
+        except Exception:  # noqa: BLE001
             return None
-        vals = [None] * len(chunk)
-        for s in res.get("samples", []):
-            try:
-                idx = int(s.get("locationId", -1))
-                v = float(s.get("value"))
-                if 0 <= idx < len(chunk):
-                    vals[idx] = v
-            except (TypeError, ValueError):
-                continue
-        out.extend(vals)
-    return out
+        if not math.isfinite(v) or v < -100 or v > 1200:
+            return None
+        return v
 
 
 def centroid(ring):
@@ -119,61 +160,97 @@ def centroid(ring):
     return (cx / (6 * a), cy / (6 * a))
 
 
+def median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
 def main():
     buildings = json.load(open("data/cyberport-buildings.json"))["buildings"]
     found = discover()
-    if not found:
-        print("No image services discovered — leaving heights as they are.")
+    dsm_url = pick(found, ["surface", "dsm"], ["terrain", "dtm"])
+    dtm_url = pick(found, ["terrain", "dtm"], ["surface", "dsm"])
+    print(f"chosen DSM: {dsm_url}")
+    print(f"chosen DTM: {dtm_url}")
+    if not dsm_url or not dtm_url:
+        print("Could not identify both models — leaving data as it is.")
         return 0
 
-    dsm = pick(found, ["surface", "dsm"], ["terrain", "dtm"])
-    dtm = pick(found, ["terrain", "dtm"], ["surface", "dsm"])
-    print(f"chosen DSM: {dsm}")
-    print(f"chosen DTM: {dtm}")
-    if not dsm or not dtm:
-        print("Could not identify both models — leaving heights as they are.")
+    try:
+        dsm = Elevation(dsm_url, "DSM")
+        dtm = Elevation(dtm_url, "DTM")
+    except Exception as exc:  # noqa: BLE001
+        print(f"service metadata unavailable: {exc}")
         return 0
 
-    # Several points per building — centroid plus vertices pulled well inside
-    # — so a lift machine room or a light well can't set the whole height.
-    pts = []
-    owner = []
+    # Probe one point before doing real work, so failures are obvious.
+    probe = (114.130, 22.261)
+    a, g = dsm.at(*probe), dtm.at(*probe)
+    print(f"probe at {probe}: DSM={a} DTM={g}")
+    if a is None or g is None:
+        print("Probe failed — leaving data as it is.")
+        return 0
+
+    heights = {}
     for i, b in enumerate(buildings):
         ring = b["p"]
         cx, cy = centroid(ring)
-        samples = [(cx, cy)]
+        pts = [(cx, cy)]
         step = max(1, len(ring) // 4)
         for k in range(0, len(ring), step):
             x, y = ring[k]
-            samples.append((cx + (x - cx) * 0.55, cy + (y - cy) * 0.55))
-        for p in samples[:5]:
-            pts.append(p)
-            owner.append(i)
-
-    print(f"sampling {len(pts)} points from DSM…")
-    dsm_v = sample(dsm, pts)
-    if dsm_v is None:
-        return 0
-    print(f"sampling {len(pts)} points from DTM…")
-    dtm_v = sample(dtm, pts)
-    if dtm_v is None:
-        return 0
-
-    per_building = {}
-    for idx, a, g in zip(owner, dsm_v, dtm_v):
-        if a is None or g is None:
+            pts.append((cx + (x - cx) * 0.55, cy + (y - cy) * 0.55))
+        vals = []
+        for lon, lat in pts[:5]:
+            s = dsm.at(lon, lat)
+            t = dtm.at(lon, lat)
+            if s is not None and t is not None:
+                vals.append(s - t)
+        if not vals:
             continue
-        per_building.setdefault(idx, []).append(a - g)
-
-    heights = {}
-    for idx, vals in per_building.items():
-        vals.sort()
-        h = vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals) // 2 - 1] + vals[len(vals) // 2]) / 2
+        h = median(vals)
         if 2.5 <= h <= 500:
-            heights[str(idx)] = round(h, 1)
+            heights[str(i)] = round(h, 1)
     print(f"measured heights for {len(heights)} / {len(buildings)} buildings")
     if heights:
         json.dump(heights, open("hk-heights.json", "w"))
+
+    # Rebuild the terrain grid from the 5 m DTM: sharper than the 30 m global
+    # fallback, and consistent with the heights measured above.
+    grid = []
+    holes = 0
+    lo, hi = 1e9, -1e9
+    for j in range(GRID_N):
+        lat = BBOX["north"] - (BBOX["north"] - BBOX["south"]) * j / (GRID_N - 1)
+        for i in range(GRID_N):
+            lon = BBOX["west"] + (BBOX["east"] - BBOX["west"]) * i / (GRID_N - 1)
+            v = dtm.at(lon, lat)
+            if v is None:
+                v = 0.0
+                holes += 1
+            v = max(0, min(1000, v))
+            grid.append(int(round(v)))
+            lo, hi = min(lo, v), max(hi, v)
+    if holes < GRID_N * GRID_N * 0.25 and hi > 20:
+        buf = struct.pack(f"<{len(grid)}h", *grid)
+        json.dump(
+            {
+                "attribution": "Elevation: Lands Department, HKSAR Government (2020 LiDAR DTM, 5m)",
+                "west": BBOX["west"],
+                "south": BBOX["south"],
+                "east": BBOX["east"],
+                "north": BBOX["north"],
+                "size": GRID_N,
+                "min": int(lo),
+                "max": int(hi),
+                "data": base64.b64encode(buf).decode(),
+            },
+            open("data/terrain.json", "w"),
+        )
+        print(f"terrain grid from HK DTM: {GRID_N}x{GRID_N} min={lo:.0f} max={hi:.0f} holes={holes}")
+    else:
+        print(f"DTM grid rejected (holes={holes} max={hi}) — keeping existing terrain")
     return 0
 
 
