@@ -388,6 +388,104 @@ const fallbackRoof =
     ? correct([0, 1, 2].map((k) => all.reduce((s, c) => s + c[k], 0) / all.length))
     : [168, 166, 160];
 
+/* ---------- heights for buildings nobody has measured ----------
+
+   241-odd buildings here carry a real mapped height. Rather than stamping
+   every remaining building with a flat guess, fit the local building stock:
+   group the KNOWN heights by type and footprint size, then give each unknown
+   building the median of its matching group. The result is grounded in this
+   district's actual buildings and produces real variety instead of a sea of
+   identical 16 m slabs. Still an estimate — flagged as such in `hs`. */
+
+function areaOf(ring) {
+  const R = 6378137;
+  const rad = Math.PI / 180;
+  const latRef = ring[0][1] * rad;
+  let a = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[(i + 1) % ring.length];
+    a += x1 * rad * Math.cos(latRef) * R * (y2 * rad * R) - x2 * rad * Math.cos(latRef) * R * (y1 * rad * R);
+  }
+  return Math.abs(a / 2);
+}
+
+const sizeBucket = (area) => Math.max(0, Math.min(5, Math.floor(Math.log2(Math.max(area, 25) / 50))));
+const median = (xs) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+};
+
+// Directly measured heights (HK 2020 LiDAR, DSM minus DTM) outrank every
+// other source — they are observations of the actual buildings.
+let lidarApplied = 0;
+if (existsSync("hk-heights.json")) {
+  try {
+    const lidar = JSON.parse(readFileSync("hk-heights.json", "utf8"));
+    buildings.forEach((b, i) => {
+      const h = Number(lidar[String(i)]);
+      if (Number.isFinite(h) && h >= 2.5 && h <= 500) {
+        b.h = Math.round(h * 10) / 10;
+        b.hs = "lidar";
+        lidarApplied++;
+      }
+    });
+  } catch (_) {
+    /* leave heights alone */
+  }
+}
+console.log(`lidar heights applied: ${lidarApplied}`);
+
+{
+  const groups = new Map();
+  const bySize = new Map();
+  const knownHeights = [];
+  for (const b of buildings) {
+    b._area = areaOf(b.p);
+    if (b.hs !== "tag" && b.hs !== "overture" && b.hs !== "lidar") continue;
+    const bucket = sizeBucket(b._area);
+    const key = `${b.t || "yes"}|${bucket}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(b.h);
+    if (!bySize.has(bucket)) bySize.set(bucket, []);
+    bySize.get(bucket).push(b.h);
+    knownHeights.push(b.h);
+  }
+  const globalMedian = knownHeights.length ? median(knownHeights) : 12;
+
+  const predict = (b) => {
+    const bucket = sizeBucket(b._area);
+    const g = groups.get(`${b.t || "yes"}|${bucket}`);
+    if (g && g.length >= 4) return median(g);
+    const s = bySize.get(bucket);
+    if (s && s.length >= 4) return median(s);
+    return globalMedian;
+  };
+
+  // Honest accuracy check: how well does the model reproduce the heights we
+  // actually know? Reported so the estimate's quality is never a mystery.
+  const errs = [];
+  for (const b of buildings) {
+    if (b.hs === "tag" || b.hs === "overture" || b.hs === "lidar") {
+      errs.push(Math.abs(predict(b) - b.h));
+    }
+  }
+  console.log(
+    `height model: ${knownHeights.length} known, ${groups.size} groups, ` +
+      `median abs error on known buildings = ${errs.length ? median(errs).toFixed(1) : "n/a"} m`
+  );
+
+  let estimated = 0;
+  for (const b of buildings) {
+    if (b.hs === "tag" || b.hs === "overture" || b.hs === "lidar") continue;
+    b.h = Math.round(predict(b) * 10) / 10;
+    b.hs = "modelled";
+    estimated++;
+  }
+  console.log(`heights modelled from local building stock: ${estimated}`);
+  for (const b of buildings) delete b._area;
+}
+
 /* Pass 2 — apply the correction and derive facades. */
 for (const b of buildings) {
   const tagRoof = parseHex(b.rcTag);

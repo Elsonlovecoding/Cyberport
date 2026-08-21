@@ -81,6 +81,13 @@ jobs:
           assert len(feats) > 0, "no Overture features returned"
           PY
 
+      # Real measured heights: HK's 2020 LiDAR surface model minus its terrain
+      # model. Best effort — the script exits 0 if the services don't answer.
+      - name: Measure heights from HK LiDAR (DSM - DTM)
+        continue-on-error: true
+        timeout-minutes: 15
+        run: python3 scripts/fetch-hk-heights.py
+
       - name: Bake real terrain elevation
         continue-on-error: true
         run: |
