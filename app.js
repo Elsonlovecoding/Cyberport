@@ -155,11 +155,15 @@ const BOOKMARKS = [
   // lighting and readable shadows — the clock never animates in this app.
   viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-08-19T06:30:00Z");
   viewer.shadowMap.size = 2048;
-  viewer.shadowMap.softShadows = true;
+  // Soft (PCF) shadows over a long range stripe sunlit walls with shadow
+  // acne — the surface shadowing itself. Keep the shadowed volume tight and
+  // let the normal offset push samples off the surface.
+  viewer.shadowMap.softShadows = false;
+  viewer.shadowMap.normalOffset = true;
+  viewer.shadowMap.maximumDistance = 2500;
   // Aerial photos already contain baked-in shade; a fully dark shadow on top
-  // of that reads as black holes, so keep shadows soft and translucent.
+  // of that reads as black holes, so keep shadows light.
   viewer.shadowMap.darkness = 0.55;
-  viewer.shadowMap.maximumDistance = 8000;
   scene.globe.shadows = Cesium.ShadowMode.RECEIVE_ONLY;
   // Aerial haze over distance, as in real photos of the harbour.
   scene.fog.enabled = true;

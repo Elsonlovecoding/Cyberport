@@ -49,12 +49,26 @@ from map providers.
 
 ## The key-free "Open 3D" source
 
-`data/cyberport-buildings.json` is a compact extract of **real OpenStreetMap
-building footprints and heights** around Cyberport (heights come from OSM
-`height`/`building:levels` tags where mapped, conservative defaults otherwise).
-The viewer extrudes them client-side — real building massing, in the spirit of
-Google Earth's classic gray-buildings view, though not the photorealistic
-textured mesh of the two keyed sources.
+Real building massing over real ground, built entirely from open data:
+
+| What you see | Where it comes from |
+| --- | --- |
+| Building footprints | OpenStreetMap (ODbL) |
+| Building **heights** | Hong Kong's 2020 LiDAR survey — the Lands Department's Digital Surface Model minus its Digital Terrain Model, sampled at five points inside each footprint. That difference is the building's *measured* height. OSM/Overture tags fill gaps; anything still unknown is modelled from the heights we do know (see below). |
+| Building **colours** | Measured from the Lands Department orthophoto in `data/imagery` — each roof's real pixels, white-balanced and exposure-corrected. Facades use mapped colours where they exist, otherwise they're derived from the measured roof. |
+| **Terrain** | The same 2020 LiDAR Digital Terrain Model at 5 m, baked to `data/terrain.json`, so Pok Fu Lam's hillside is real relief and every building sits on its true ground level |
+| Ground imagery | Lands Department aerial photography |
+
+Each building records its provenance so nothing is mistaken for measurement it
+isn't: `hs` is the height source (`lidar`, `tag`, `overture`, `modelled`) and
+`cs` is the colour source (`photo`, `tag`, `default`). Buildings with no
+measurement are modelled by fitting the *known* heights in this district by
+building type and footprint size — the enrichment step prints that model's
+median absolute error on the buildings it can check.
+
+This is real geometry and real colour, but it is not the photographed,
+textured mesh the two keyed sources provide — facade detail comes from colour,
+not photography.
 
 To refresh the extract, run the **Fetch OSM building data** workflow from the
 repository's Actions tab — it queries the Overpass API and commits the updated
@@ -145,6 +159,12 @@ Data sources:
 - **Building data © OpenStreetMap contributors**, licensed
   [ODbL](https://www.openstreetmap.org/copyright) — used by the Open 3D source
   (and the OSM raster imagery fallback).
+- **Aerial imagery, elevation and building heights © The Government of the
+  HKSAR (Lands Department)** — the
+  [Imagery Map API](https://geodata.gov.hk/gs/imagery-map-api) and the
+  2020 LiDAR Digital Surface / Terrain Models, published as open data.
+- **Building attributes from [Overture Maps](https://overturemaps.org/)**
+  where present.
 
 ## Performance notes
 
