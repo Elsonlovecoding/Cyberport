@@ -509,6 +509,75 @@ for (const b of buildings) {
   delete b.facadeColor;
 }
 
+/* ---------- trees: elevations for mapped trees, scatter in green areas ----------
+
+   Mapped `natural=tree` nodes are real, individually surveyed positions.
+   Green polygons (parks/woods) get a deterministic scatter so the canopy
+   the aerial photo shows as flat texture gains 3D presence — those points
+   are synthesized inside REAL green areas and marked as such (src=0). */
+
+function pipRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+const hash2 = (x, y) => {
+  const v = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return v - Math.floor(v);
+};
+
+{
+  const mapped = Array.isArray(data.trees) ? data.trees : [];
+  const rings = Array.isArray(data.green) ? data.green : [];
+  const out = [];
+  for (const t of mapped) {
+    out.push([t[0], t[1], Math.round(groundAt(t[0], t[1]) * 10) / 10, 1]);
+  }
+
+  // Scatter: walk a ~11 m grid over each green polygon, keep a jittered,
+  // hashed subset. Wood/large polygons get sparser coverage than lawns.
+  const DEG = 0.0001; // ~10.4 m east-west here
+  let scattered = 0;
+  const CAP = 2300;
+  for (const ring of rings) {
+    if (out.length >= CAP + mapped.length) break;
+    const lons = ring.map((p) => p[0]);
+    const lats = ring.map((p) => p[1]);
+    const minLon = Math.min(...lons);
+    const maxLon = Math.max(...lons);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const cells = ((maxLon - minLon) / DEG) * ((maxLat - minLat) / DEG);
+    const keep = cells > 4000 ? 0.10 : 0.30; // big woods sparser than lawns
+    for (let lat = minLat; lat <= maxLat; lat += DEG) {
+      for (let lon = minLon; lon <= maxLon; lon += DEG) {
+        const r = hash2(lon * 9631.7, lat * 8117.3);
+        if (r > keep) continue;
+        const jl = lon + (hash2(lon * 51.3, lat * 77.9) - 0.5) * DEG;
+        const jt = lat + (hash2(lon * 33.1, lat * 91.7) - 0.5) * DEG;
+        if (!pipRing(jl, jt, ring)) continue;
+        out.push([
+          Math.round(jl * 1e6) / 1e6,
+          Math.round(jt * 1e6) / 1e6,
+          Math.round(groundAt(jl, jt) * 10) / 10,
+          0,
+        ]);
+        scattered++;
+        if (out.length >= CAP + mapped.length) break;
+      }
+      if (out.length >= CAP + mapped.length) break;
+    }
+  }
+  data.trees = out;
+  delete data.green; // rings served their purpose; keep the file lean
+  console.log(`trees: mapped=${mapped.length} scattered=${scattered}`);
+}
+
 data.buildings = buildings;
 data.appearance = {
   roofColours: "measured from Lands Department orthophoto (data/imagery)",

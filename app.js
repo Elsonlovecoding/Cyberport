@@ -361,7 +361,7 @@ const BOOKMARKS = [
     };
   }
 
-  // Fallback only — used if the data predates the colour-measurement pass.
+  // Fallback colours — only used if the data predates the colour pass.
   function fallbackColor(b, roof) {
     const jitter = (Math.abs(Math.sin(b.p[0][0] * 4321.7 + b.p[0][1] * 1234.3)) - 0.5) * 0.09;
     if (b.h > 90) {
@@ -375,6 +375,184 @@ const BOOKMARKS = [
 
   const colorFrom = (hex, b, roof) =>
     hex ? Cesium.Color.fromCssColorString(hex) : fallbackColor(b, roof);
+
+  /* Custom appearance that draws a procedural window grid on every facade,
+     in real metres (3.1 m floors, 2.6 m bays), tinted by the building's
+     measured colour. Primitive rewrites `in vec4 color` to the per-instance
+     batch-table colour, and the per-instance `winBase` attribute (ground
+     elevation) becomes czm_batchTable_winBase so floors count from each
+     building's own base. Local metre coordinates are computed from the
+     high/low position split against an inlined ENU frame, which keeps full
+     precision without uniforms. */
+  function buildingAppearance(origin) {
+    const enu = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
+    const inv = Cesium.Matrix4.inverseTransformation(enu, new Cesium.Matrix4());
+    const rot = Cesium.Matrix4.getMatrix3(inv, new Cesium.Matrix3());
+    const m = Array.from({ length: 9 }, (_, i) => rot[i]);
+    const enc = Cesium.EncodedCartesian3.fromCartesian(origin);
+    const v3 = (c) => `vec3(${c.x}, ${c.y}, ${c.z})`;
+
+    const vs = `in vec3 position3DHigh;
+in vec3 position3DLow;
+in vec3 normal;
+in float batchId;
+in vec4 color;
+
+out vec3 v_positionEC;
+out vec3 v_normalEC;
+out vec3 v_local;
+out vec3 v_normalLocal;
+out vec4 v_color;
+out float v_winBase;
+
+void main()
+{
+    vec4 p = czm_computePosition();
+    v_positionEC = (czm_modelViewRelativeToEye * p).xyz;
+    v_normalEC = czm_normal * normal;
+    mat3 enuRot = mat3(${m.join(', ')});
+    vec3 dHigh = position3DHigh - ${v3(enc.high)};
+    vec3 dLow = position3DLow - ${v3(enc.low)};
+    v_local = enuRot * dHigh + enuRot * dLow;
+    v_normalLocal = enuRot * normal;
+    v_color = color;
+    v_winBase = czm_batchTable_winBase(batchId);
+    gl_Position = czm_modelViewProjectionRelativeToEye * p;
+}
+`;
+
+    const fs = `in vec3 v_positionEC;
+in vec3 v_normalEC;
+in vec3 v_local;
+in vec3 v_normalLocal;
+in vec4 v_color;
+in float v_winBase;
+
+float bhash(vec2 p)
+{
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main()
+{
+    vec3 normalEC = normalize(v_normalEC);
+    if (dot(normalEC, normalize(v_positionEC)) > 0.0) normalEC = -normalEC;
+
+    vec3 nl = normalize(v_normalLocal);
+    vec3 albedo = v_color.rgb;
+
+    if (abs(nl.z) < 0.45)
+    {
+        // Facade: window grid at real floor scale.
+        vec2 fdir = normalize(vec2(-nl.y, nl.x));
+        float h = dot(v_local.xy, fdir);
+        float z = v_local.z - v_winBase;
+        float fz = fract(z / 3.1);
+        float fh = fract(h / 2.6);
+        float win = step(0.32, fz) * (1.0 - step(0.84, fz))
+                  * step(0.15, fh) * (1.0 - step(0.87, fh));
+        win *= step(4.2, z); // taller, mostly solid ground floor
+        vec2 cell = vec2(floor(h / 2.6), floor(z / 3.1));
+        float r = bhash(cell);
+        vec3 glass = mix(vec3(0.16, 0.20, 0.26), vec3(0.50, 0.58, 0.68), step(0.72, r));
+        glass *= 0.8 + 0.4 * r;
+        albedo = mix(albedo, glass, win * 0.92);
+        // faint slab line between floors
+        albedo = mix(albedo, albedo * 0.84, (1.0 - step(0.05, fz)) * 0.6);
+        // storefront band on the ground floor
+        float door = step(0.8, z) * (1.0 - step(3.4, z)) * step(0.1, fract(h / 5.2)) * (1.0 - step(0.9, fract(h / 5.2)));
+        albedo = mix(albedo, vec3(0.20, 0.22, 0.25), door * 0.75);
+    }
+    else
+    {
+        // Roof: faint panel variation so large roofs are not billiard-flat.
+        float r = bhash(floor(v_local.xy / 2.3));
+        albedo *= 0.95 + 0.08 * r;
+    }
+
+    float diffuse = clamp(dot(normalEC, normalize(czm_lightDirectionEC)), 0.0, 1.0);
+    out_FragColor = vec4(albedo * (0.42 + 0.62 * diffuse), 1.0);
+}
+`;
+
+    return new Cesium.Appearance({
+      translucent: false,
+      closed: false,
+      vertexShaderSource: vs,
+      fragmentShaderSource: fs,
+      renderState: { depthTest: { enabled: true } },
+    });
+  }
+
+  /* Trees: real mapped positions (plus documented in-park scatter) from
+     data/cyberport-buildings.json. Simple trunk + canopy solids with varied
+     size and green — readable as trees at viewer scales without pretending
+     to be photographs. */
+  function createTreesPrimitive(treeList) {
+    const instances = [];
+    const trunkColor = Cesium.ColorGeometryInstanceAttribute.fromColor(
+      new Cesium.Color(0.33, 0.26, 0.2, 1)
+    );
+    const count = Math.min(treeList.length, 2600);
+    for (let i = 0; i < count; i++) {
+      const t = treeList[i];
+      const lon = t[0];
+      const lat = t[1];
+      const ground = t[2] || 0;
+      const r1 = Math.abs(Math.sin(lon * 5231.3 + lat * 913.7));
+      const r2 = Math.abs(Math.sin(lon * 1723.9 + lat * 4111.1));
+      const trunkLen = 2.6 + 2.4 * r1;
+      const canopyR = 1.7 + 1.6 * r2;
+      const base = Cesium.Cartesian3.fromDegrees(lon, lat, ground - 0.5);
+      const frame = Cesium.Transforms.eastNorthUpToFixedFrame(base);
+      instances.push(
+        new Cesium.GeometryInstance({
+          geometry: new Cesium.CylinderGeometry({
+            length: trunkLen + 1,
+            topRadius: 0.18,
+            bottomRadius: 0.3,
+            slices: 5,
+            vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
+          }),
+          modelMatrix: Cesium.Matrix4.multiplyByTranslation(
+            frame,
+            new Cesium.Cartesian3(0, 0, (trunkLen + 1) / 2),
+            new Cesium.Matrix4()
+          ),
+          attributes: { color: trunkColor },
+        })
+      );
+      const g = 0.36 + 0.18 * r1;
+      instances.push(
+        new Cesium.GeometryInstance({
+          geometry: new Cesium.EllipsoidGeometry({
+            radii: new Cesium.Cartesian3(canopyR, canopyR, canopyR * 1.25),
+            stackPartitions: 6,
+            slicePartitions: 7,
+            vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
+          }),
+          modelMatrix: Cesium.Matrix4.multiplyByTranslation(
+            frame,
+            new Cesium.Cartesian3(0, 0, trunkLen + canopyR * 0.9),
+            new Cesium.Matrix4()
+          ),
+          attributes: {
+            color: Cesium.ColorGeometryInstanceAttribute.fromColor(
+              new Cesium.Color(0.16 + 0.1 * r2, g, 0.14 + 0.08 * r1, 1)
+            ),
+          },
+        })
+      );
+    }
+    if (instances.length === 0) return null;
+    return new Cesium.Primitive({
+      geometryInstances: instances,
+      appearance: new Cesium.PerInstanceColorAppearance({ closed: true, translucent: false }),
+      shadows: Cesium.ShadowMode.ENABLED,
+      asynchronous: true,
+      allowPicking: false,
+    });
+  }
 
   async function createOsmBuildings() {
     const resp = await fetch("data/cyberport-buildings.json");
@@ -390,10 +568,13 @@ const BOOKMARKS = [
       // Ground level under the building (baked from the terrain grid), so a
       // building on the hillside starts at the hillside, not at sea level.
       const base = Number.isFinite(b.g) ? b.g : 0;
-      // Sink the base slightly so walls meet the terrain mesh with no gap
-      // where the baked grid and the rendered surface disagree.
-      const bottom = base - 3;
+      const bottom = base - 3; // sink so walls meet the terrain with no gap
       const top = base + b.h;
+      const winBase = new Cesium.GeometryInstanceAttribute({
+        componentDatatype: Cesium.ComponentDatatype.FLOAT,
+        componentsPerAttribute: 1,
+        value: [base],
+      });
       try {
         // Roof: its real colour, measured from the aerial orthophoto.
         instances.push(
@@ -407,6 +588,7 @@ const BOOKMARKS = [
             }),
             attributes: {
               color: Cesium.ColorGeometryInstanceAttribute.fromColor(colorFrom(b.rc, b, true)),
+              winBase,
             },
           })
         );
@@ -423,6 +605,7 @@ const BOOKMARKS = [
             }),
             attributes: {
               color: Cesium.ColorGeometryInstanceAttribute.fromColor(colorFrom(b.fc, b, false)),
+              winBase,
             },
           })
         );
@@ -435,20 +618,21 @@ const BOOKMARKS = [
       // showOnScreen: ODbL attribution must be visible, not just in the lightbox
       new Cesium.Credit("© OpenStreetMap contributors", true)
     );
-    return new Cesium.Primitive({
+    const bx = data.bbox || { west: 114.13, south: 22.26, east: 114.13, north: 22.26 };
+    const origin = Cesium.Cartesian3.fromDegrees(
+      (bx.west + bx.east) / 2,
+      (bx.south + bx.north) / 2,
+      0
+    );
+    const buildings = new Cesium.Primitive({
       geometryInstances: instances,
-      // Lit (not flat) so walls catch the sun and roofs read as surfaces;
-      // faceForward keeps wall normals toward the viewer.
-      appearance: new Cesium.PerInstanceColorAppearance({
-        flat: false,
-        faceForward: true,
-        closed: false,
-        translucent: false,
-      }),
+      appearance: buildingAppearance(origin),
       shadows: Cesium.ShadowMode.ENABLED,
       asynchronous: true,
       allowPicking: false,
     });
+    const trees = Array.isArray(data.trees) ? createTreesPrimitive(data.trees) : null;
+    return { primitive: buildings, extras: trees ? [trees] : [] };
   }
 
   function createTileset(key) {
@@ -543,11 +727,18 @@ const BOOKMARKS = [
       if (src.state === "loading") {
         // First awaiter to resume wires the content up; concurrent awaiters
         // see state "ready" and skip this block.
-        content.show = false;
-        scene.primitives.add(content);
         if (key === "osm") {
-          src.primitive = content;
+          content.primitive.show = false;
+          scene.primitives.add(content.primitive);
+          src.primitive = content.primitive;
+          src.extras = content.extras || [];
+          for (const extra of src.extras) {
+            extra.show = false;
+            scene.primitives.add(extra);
+          }
         } else {
+          content.show = false;
+          scene.primitives.add(content);
           const tileset = content;
           tileset.loadProgress.addEventListener(function (pending, processing) {
             src.streaming = pending + processing;
@@ -581,8 +772,10 @@ const BOOKMARKS = [
 
     activeKey = key;
     for (const [k, s] of Object.entries(sources)) {
+      const shown = k === key;
       const display = s.tileset || s.primitive;
-      if (display) display.show = k === key;
+      if (display) display.show = shown;
+      for (const extra of s.extras || []) extra.show = shown;
     }
     applyMode(key);
     updateSourceButtons();

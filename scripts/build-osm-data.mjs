@@ -81,8 +81,31 @@ function resolveWayGeometry(way) {
 const buildings = [];
 let skipped = 0;
 
+// Real mapped trees and green areas (parks/woods) for the tree layer.
+const trees = [];
+const green = [];
+const GREEN_TAGS = (tags) =>
+  /^(park|garden)$/.test(tags.leisure || "") ||
+  /^(wood|scrub)$/.test(tags.natural || "") ||
+  /^(grass|forest|recreation_ground|village_green|meadow)$/.test(tags.landuse || "");
+
+
 for (const el of raw.elements || []) {
   const tags = el.tags || {};
+  if (el.type === "node" && tags.natural === "tree") {
+    if (
+      el.lat >= BBOX.south && el.lat <= BBOX.north &&
+      el.lon >= BBOX.west && el.lon <= BBOX.east
+    ) {
+      trees.push([round(el.lon), round(el.lat)]);
+    }
+    continue;
+  }
+  if (el.type === "way" && GREEN_TAGS(tags)) {
+    const ring = ringFromGeometry(resolveWayGeometry(el));
+    if (ring) green.push(ring);
+    continue;
+  }
   if (!tags.building || tags.building === "no") continue;
 
   const rings = [];
@@ -132,11 +155,14 @@ const out = {
   bbox: BBOX,
   count: buildings.length,
   buildings,
+  trees,
+  green,
 };
 
 mkdirSync("data", { recursive: true });
 writeFileSync("data/cyberport-buildings.json", JSON.stringify(out));
 
+console.log(`mappedTrees=${trees.length} greenAreas=${green.length}`);
 const named = buildings.filter((b) => b.n).length;
 const tallest = buildings[0];
 console.log(
