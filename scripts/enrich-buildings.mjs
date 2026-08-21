@@ -196,23 +196,88 @@ function deriveFacade(roof, b) {
   return c;
 }
 
+/* ---------- ground elevation (so buildings sit on the real hillside) ---------- */
+
+let terrain = null;
+if (existsSync("data/terrain.json")) {
+  try {
+    const t = JSON.parse(readFileSync("data/terrain.json", "utf8"));
+    const buf = Buffer.from(t.data, "base64");
+    terrain = {
+      ...t,
+      grid: new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2),
+    };
+  } catch (_) {
+    terrain = null;
+  }
+}
+
+function groundAt(lon, lat) {
+  if (!terrain) return 0;
+  const n = terrain.size;
+  const fx = ((lon - terrain.west) / (terrain.east - terrain.west)) * (n - 1);
+  const fy = ((terrain.north - lat) / (terrain.north - terrain.south)) * (n - 1);
+  const x = Math.max(0, Math.min(n - 1, fx));
+  const y = Math.max(0, Math.min(n - 1, fy));
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = Math.min(n - 1, x0 + 1);
+  const y1 = Math.min(n - 1, y0 + 1);
+  const tx = x - x0;
+  const ty = y - y0;
+  const g = terrain.grid;
+  const top = g[y0 * n + x0] * (1 - tx) + g[y0 * n + x1] * tx;
+  const bot = g[y1 * n + x0] * (1 - tx) + g[y1 * n + x1] * tx;
+  return top * (1 - ty) + bot * ty;
+}
+
 /* ---------- Overture heights (best effort) ---------- */
+
+// Accepts either GeoJSON (what the overturemaps CLI writes) or one JSON
+// object per line, so the source can change without touching this script.
+function coordCentre(geom) {
+  const xs = [];
+  const ys = [];
+  const walk = (a) => {
+    if (typeof a[0] === "number") {
+      xs.push(a[0]);
+      ys.push(a[1]);
+    } else for (const sub of a) walk(sub);
+  };
+  if (!geom || !Array.isArray(geom.coordinates)) return null;
+  walk(geom.coordinates);
+  if (!xs.length) return null;
+  return [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2];
+}
 
 let overture = [];
 if (existsSync(OVERTURE)) {
   try {
-    const raw = readFileSync(OVERTURE, "utf8").trim();
-    if (raw) {
-      overture = raw
-        .split("\n")
-        .map((line) => {
+    const rawText = readFileSync(OVERTURE, "utf8").trim();
+    if (rawText) {
+      const records = [];
+      if (rawText.startsWith("{") && rawText.includes('"FeatureCollection"')) {
+        const fc = JSON.parse(rawText);
+        for (const f of fc.features || []) {
+          const c = coordCentre(f.geometry);
+          if (c) records.push({ lon: c[0], lat: c[1], ...(f.properties || {}) });
+        }
+      } else {
+        for (const line of rawText.split("\n")) {
           try {
-            return JSON.parse(line);
+            const o = JSON.parse(line);
+            if (o && o.type === "Feature") {
+              const c = coordCentre(o.geometry);
+              if (c) records.push({ lon: c[0], lat: c[1], ...(o.properties || {}) });
+            } else if (o) {
+              records.push(o);
+            }
           } catch (_) {
-            return null;
+            /* skip malformed line */
           }
-        })
-        .filter((o) => o && Number.isFinite(o.lon) && Number.isFinite(o.lat));
+        }
+      }
+      overture = records.filter((o) => Number.isFinite(o.lon) && Number.isFinite(o.lat));
     }
   } catch (_) {
     overture = [];
@@ -248,8 +313,20 @@ let taggedColours = 0;
 
 /* Pass 1 — merge Overture attributes and measure raw roof colour. */
 const raw = new Map();
+let onTerrain = 0;
 for (const b of buildings) {
   const [cx, cy] = centroidOf(b.p);
+
+  if (terrain) {
+    // Lowest corner of the footprint: a building cut into a slope meets the
+    // ground at its downhill side, so anchoring there avoids it floating.
+    let g = Infinity;
+    for (const [lon, lat] of b.p) g = Math.min(g, groundAt(lon, lat));
+    if (Number.isFinite(g)) {
+      b.g = Math.round(g * 10) / 10;
+      onTerrain++;
+    }
+  }
 
   const o = overture.length ? nearestOverture(cx, cy) : null;
   if (o) {
@@ -348,7 +425,8 @@ for (const b of buildings) byHeight[b.hs] = (byHeight[b.hs] || 0) + 1;
 console.log(
   `buildings=${buildings.length} roofColourMeasured=${measured} ` +
     `taggedColour=${taggedColours} noPixels=${noPixels} ` +
-    `overtureHeights=${heightsFromOverture} heightSources=${JSON.stringify(byHeight)}`
+    `overtureHeights=${heightsFromOverture} onTerrain=${onTerrain} ` +
+    `heightSources=${JSON.stringify(byHeight)}`
 );
 if (measured + taggedColours < buildings.length * 0.5) {
   console.error("Fewer than half the buildings got a real colour — check imagery.");

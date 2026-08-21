@@ -198,6 +198,74 @@ const BOOKMARKS = [
     );
   }
 
+  // Real topography for the Cyberport area, baked from AWS Terrain Tiles into
+  // data/terrain.json (see scripts/fetch-terrain.mjs). Without this the whole
+  // district renders as a flat plane with the hillside merely painted on.
+  async function initTerrain() {
+    let t;
+    try {
+      const resp = await fetch("data/terrain.json");
+      if (!resp.ok) return;
+      t = await resp.json();
+    } catch (_) {
+      return; // no bundled terrain — the ellipsoid surface still works
+    }
+    let grid;
+    try {
+      const bin = atob(t.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      grid = new Int16Array(bytes.buffer);
+    } catch (_) {
+      return;
+    }
+    const n = t.size;
+    if (!n || grid.length < n * n) return;
+
+    // Bilinear sample of the baked grid; 0 (sea level) outside its footprint.
+    const sample = function (lon, lat) {
+      if (lon < t.west || lon > t.east || lat < t.south || lat > t.north) return 0;
+      const fx = ((lon - t.west) / (t.east - t.west)) * (n - 1);
+      const fy = ((t.north - lat) / (t.north - t.south)) * (n - 1);
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const x1 = Math.min(n - 1, x0 + 1);
+      const y1 = Math.min(n - 1, y0 + 1);
+      const tx = fx - x0;
+      const ty = fy - y0;
+      const top = grid[y0 * n + x0] * (1 - tx) + grid[y0 * n + x1] * tx;
+      const bot = grid[y1 * n + x0] * (1 - tx) + grid[y1 * n + x1] * tx;
+      return top * (1 - ty) + bot * ty;
+    };
+
+    const SIZE = 64; // heightmap samples per tile edge
+    const tilingScheme = new Cesium.GeographicTilingScheme();
+    const rectScratch = new Cesium.Rectangle();
+    scene.terrainProvider = new Cesium.CustomHeightmapTerrainProvider({
+      width: SIZE,
+      height: SIZE,
+      tilingScheme: tilingScheme,
+      credit: new Cesium.Credit(t.attribution || "Elevation: AWS Terrain Tiles", false),
+      callback: function (x, y, level) {
+        const r = tilingScheme.tileXYToRectangle(x, y, level, rectScratch);
+        const west = Cesium.Math.toDegrees(r.west);
+        const east = Cesium.Math.toDegrees(r.east);
+        const north = Cesium.Math.toDegrees(r.north);
+        const south = Cesium.Math.toDegrees(r.south);
+        const out = new Float32Array(SIZE * SIZE);
+        // Heightmap order: west to east, north to south.
+        for (let j = 0; j < SIZE; j++) {
+          const lat = north - ((north - south) * j) / (SIZE - 1);
+          for (let i = 0; i < SIZE; i++) {
+            const lon = west + ((east - west) * i) / (SIZE - 1);
+            out[j * SIZE + i] = sample(lon, lat);
+          }
+        }
+        return out;
+      },
+    });
+  }
+
   // Real aerial photography of the Cyberport area, bundled in the repo from
   // the HK Government's open Imagery Map API (see scripts/fetch-imagery.mjs).
   // Draped on top of the world base imagery; skipped silently if absent.
@@ -315,6 +383,13 @@ const BOOKMARKS = [
       if (!Array.isArray(b.p) || b.p.length < 3) continue;
       const flat = [];
       for (const pt of b.p) flat.push(pt[0], pt[1]);
+      // Ground level under the building (baked from the terrain grid), so a
+      // building on the hillside starts at the hillside, not at sea level.
+      const base = Number.isFinite(b.g) ? b.g : 0;
+      // Sink the base slightly so walls meet the terrain mesh with no gap
+      // where the baked grid and the rendered surface disagree.
+      const bottom = base - 3;
+      const top = base + b.h;
       try {
         // Roof: its real colour, measured from the aerial orthophoto.
         instances.push(
@@ -323,7 +398,7 @@ const BOOKMARKS = [
               polygonHierarchy: new Cesium.PolygonHierarchy(
                 Cesium.Cartesian3.fromDegreesArray(flat)
               ),
-              height: b.h,
+              height: top,
               vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
             }),
             attributes: {
@@ -338,8 +413,8 @@ const BOOKMARKS = [
           new Cesium.GeometryInstance({
             geometry: new Cesium.WallGeometry({
               positions: wallPositions,
-              minimumHeights: wallPositions.map(() => 0),
-              maximumHeights: wallPositions.map(() => b.h),
+              minimumHeights: wallPositions.map(() => bottom),
+              maximumHeights: wallPositions.map(() => top),
               vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
             }),
             attributes: {
@@ -1067,6 +1142,7 @@ const BOOKMARKS = [
     if (!hasHkKey) markUnavailable("hk", "API key missing");
     updateSourceButtons();
     applyMode(null);
+    initTerrain();
     initImagery().then(initLocalAerial); // aerial layer drapes above the base
 
     let flown = false;

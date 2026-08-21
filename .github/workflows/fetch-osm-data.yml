@@ -62,31 +62,30 @@ jobs:
       # layout moves, enrichment simply falls back to OSM heights.
       - name: Fetch Overture building heights
         continue-on-error: true
-        timeout-minutes: 12
+        timeout-minutes: 25
         run: |
           set -euo pipefail
-          curl -sSL --max-time 180 -o duckdb.zip \
-            https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip
-          unzip -o -q duckdb.zip
-          chmod +x ./duckdb
-          REL=$(./duckdb -noheader -list -c \
-            "INSTALL httpfs; LOAD httpfs; SET s3_region='us-west-2';
-             SELECT file FROM glob('s3://overturemaps-us-west-2/release/*')
-             ORDER BY file DESC LIMIT 1;")
-          echo "Overture release: $REL"
-          [ -n "$REL" ]
-          ./duckdb -c "
-            INSTALL httpfs; LOAD httpfs; SET s3_region='us-west-2';
-            COPY (
-              SELECT
-                (bbox.xmin + bbox.xmax) / 2 AS lon,
-                (bbox.ymin + bbox.ymax) / 2 AS lat,
-                height, num_floors, roof_color, facade_color, roof_shape
-              FROM read_parquet('${REL}/theme=buildings/type=building/*', hive_partitioning=1)
-              WHERE bbox.xmin BETWEEN 114.110 AND 114.150
-                AND bbox.ymin BETWEEN 22.243 AND 22.279
-            ) TO 'overture-buildings.json' (FORMAT JSON);"
-          wc -l overture-buildings.json
+          python3 -m pip install --quiet --upgrade overturemaps
+          # The official CLI resolves the current release and pulls only the
+          # bbox, so we don't hand-roll S3 paths that move between releases.
+          python3 -m overturemaps download \
+            --bbox=114.110,22.243,114.150,22.279 \
+            -f geojson --type=building \
+            -o overture-buildings.json
+          python3 - <<'PY'
+          import json
+          fc = json.load(open("overture-buildings.json"))
+          feats = fc.get("features", [])
+          with_h = sum(1 for f in feats if (f.get("properties") or {}).get("height"))
+          print(f"overture features={len(feats)} withHeight={with_h}")
+          assert len(feats) > 0, "no Overture features returned"
+          PY
+
+      - name: Bake real terrain elevation
+        continue-on-error: true
+        run: |
+          npm install pngjs@7 --no-save --no-audit --no-fund
+          node scripts/fetch-terrain.mjs
 
       - name: Measure real building colours from the orthophoto
         run: |
