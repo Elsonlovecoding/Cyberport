@@ -88,14 +88,35 @@ class Elevation:
         lods = ti.get("lods") or []
         if not lods:
             raise RuntimeError("no tileInfo.lods")
-        self.lod = max(lods, key=lambda l: l["level"])
-        self.res = self.lod["resolution"]
         self.fmt = ti.get("format", "?")
+        # The service advertises LODs far deeper than the 5 m survey actually
+        # caches (level 23 = 0.019 m/px), and those tiles 404. Try the level
+        # nearest the real grid first, then progressively coarser.
+        near = sorted(lods, key=lambda l: abs(l["resolution"] - 5.0))[0]
+        self.candidates = [near] + sorted(
+            [l for l in lods if l["level"] < near["level"]],
+            key=lambda l: -l["level"],
+        )
+        self.lod = self.candidates[0]
+        self.res = self.lod["resolution"]
         print(
-            f"  {name}: format={self.fmt} maxLevel={self.lod['level']} "
-            f"res={self.res:.3f} m/px tile={self.size}"
+            f"  {name}: format={self.fmt} lods={len(lods)} "
+            f"startLevel={self.lod['level']} res={self.res:.3f} m/px tile={self.size}"
         )
         self.tiles = {}
+
+    def calibrate(self, lon, lat):
+        """Pick the deepest level that actually serves a decodable tile."""
+        for lod in self.candidates[:8]:
+            self.lod = lod
+            self.res = lod["resolution"]
+            self.tiles.clear()
+            v = self.at(lon, lat)
+            if v is not None:
+                print(f"  {self.name}: using level {lod['level']} ({self.res:.3f} m/px), probe={v:.1f} m")
+                return True
+            print(f"  {self.name}: level {lod['level']} unusable")
+        return False
 
     def _tile(self, col, row):
         key = (col, row)
@@ -184,12 +205,10 @@ def main():
         print(f"service metadata unavailable: {exc}")
         return 0
 
-    # Probe one point before doing real work, so failures are obvious.
+    # Probe before doing real work, so failures are obvious and cheap.
     probe = (114.130, 22.261)
-    a, g = dsm.at(*probe), dtm.at(*probe)
-    print(f"probe at {probe}: DSM={a} DTM={g}")
-    if a is None or g is None:
-        print("Probe failed — leaving data as it is.")
+    if not dsm.calibrate(*probe) or not dtm.calibrate(*probe):
+        print("No usable tile level on one of the services — leaving data as it is.")
         return 0
 
     heights = {}
