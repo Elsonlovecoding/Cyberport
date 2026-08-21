@@ -1,0 +1,6 @@
+node_modules/
+package-lock.json
+osm-raw.json
+overture-buildings.json
+duckdb
+duckdb.zip

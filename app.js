@@ -151,11 +151,19 @@ const BOOKMARKS = [
   controller.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH];
   // Deep-sea slate wherever no imagery has loaded (keyless/offline ground).
   scene.globe.baseColor = Cesium.Color.fromCssColorString("#16222e");
-  // Fixed mid-afternoon Hong Kong sun for pleasant, consistent lighting and
-  // shadows (the clock never animates in this app).
+  // Fixed mid-afternoon Hong Kong sun (14:30 HKT) for warm, consistent
+  // lighting and readable shadows — the clock never animates in this app.
   viewer.clock.currentTime = Cesium.JulianDate.fromIso8601("2026-08-19T06:30:00Z");
   viewer.shadowMap.size = 2048;
+  viewer.shadowMap.softShadows = true;
+  // Aerial photos already contain baked-in shade; a fully dark shadow on top
+  // of that reads as black holes, so keep shadows soft and translucent.
+  viewer.shadowMap.darkness = 0.55;
+  viewer.shadowMap.maximumDistance = 8000;
   scene.globe.shadows = Cesium.ShadowMode.RECEIVE_ONLY;
+  // Aerial haze over distance, as in real photos of the harbour.
+  scene.fog.enabled = true;
+  scene.fog.density = 0.00012;
 
   // Keep the expanded "Data attribution" lightbox unobstructed: #ui (z-index 5)
   // would otherwise paint above the overlay, which is trapped at z-index 1
@@ -281,18 +289,20 @@ const BOOKMARKS = [
     };
   }
 
-  function buildingColor(b) {
-    // Deterministic variation: low-rise reads as warm concrete, high-rise as
-    // cooler curtain-wall glass; neighbours never identical.
+  // Fallback only — used if the data predates the colour-measurement pass.
+  function fallbackColor(b, roof) {
     const jitter = (Math.abs(Math.sin(b.p[0][0] * 4321.7 + b.p[0][1] * 1234.3)) - 0.5) * 0.09;
     if (b.h > 90) {
-      const base = 0.6 + jitter;
+      const base = (roof ? 0.5 : 0.6) + jitter;
       return new Cesium.Color(base, base + 0.05, base + 0.11, 1);
     }
     const t = Math.min(b.h / 90, 1);
-    const base = 0.82 - t * 0.16 + jitter;
+    const base = (roof ? 0.68 : 0.82) - t * 0.16 + jitter;
     return new Cesium.Color(base, base - 0.012, base - 0.035, 1);
   }
+
+  const colorFrom = (hex, b, roof) =>
+    hex ? Cesium.Color.fromCssColorString(hex) : fallbackColor(b, roof);
 
   async function createOsmBuildings() {
     const resp = await fetch("data/cyberport-buildings.json");
@@ -302,21 +312,38 @@ const BOOKMARKS = [
     const data = await resp.json();
     const instances = [];
     for (const b of data.buildings || []) {
+      if (!Array.isArray(b.p) || b.p.length < 3) continue;
       const flat = [];
       for (const pt of b.p) flat.push(pt[0], pt[1]);
       try {
+        // Roof: its real colour, measured from the aerial orthophoto.
         instances.push(
           new Cesium.GeometryInstance({
             geometry: new Cesium.PolygonGeometry({
               polygonHierarchy: new Cesium.PolygonHierarchy(
                 Cesium.Cartesian3.fromDegreesArray(flat)
               ),
-              height: 0,
-              extrudedHeight: b.h,
+              height: b.h,
               vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
             }),
             attributes: {
-              color: Cesium.ColorGeometryInstanceAttribute.fromColor(buildingColor(b)),
+              color: Cesium.ColorGeometryInstanceAttribute.fromColor(colorFrom(b.rc, b, true)),
+            },
+          })
+        );
+        // Walls: closed ring from ground to roof height.
+        const wallFlat = flat.concat([b.p[0][0], b.p[0][1]]);
+        const wallPositions = Cesium.Cartesian3.fromDegreesArray(wallFlat);
+        instances.push(
+          new Cesium.GeometryInstance({
+            geometry: new Cesium.WallGeometry({
+              positions: wallPositions,
+              minimumHeights: wallPositions.map(() => 0),
+              maximumHeights: wallPositions.map(() => b.h),
+              vertexFormat: Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,
+            }),
+            attributes: {
+              color: Cesium.ColorGeometryInstanceAttribute.fromColor(colorFrom(b.fc, b, false)),
             },
           })
         );
@@ -331,7 +358,14 @@ const BOOKMARKS = [
     );
     return new Cesium.Primitive({
       geometryInstances: instances,
-      appearance: new Cesium.PerInstanceColorAppearance({ closed: true, translucent: false }),
+      // Lit (not flat) so walls catch the sun and roofs read as surfaces;
+      // faceForward keeps wall normals toward the viewer.
+      appearance: new Cesium.PerInstanceColorAppearance({
+        flat: false,
+        faceForward: true,
+        closed: false,
+        translucent: false,
+      }),
       shadows: Cesium.ShadowMode.ENABLED,
       asynchronous: true,
       allowPicking: false,

@@ -110,7 +110,14 @@ for (const el of raw.elements || []) {
     if (area < 4) continue; // sliver
     buildings.push({
       h: Math.round(heightOf(tags, area) * 10) / 10,
+      // Height provenance: "tag" = mapped height/levels, "est" = estimated.
+      hs: tags.height || tags["building:height"] || tags["building:levels"] ? "tag" : "est",
       n: tags.name || tags["name:en"] || undefined,
+      // Kept for the enrichment pass (real colours/materials where mapped).
+      t: tags.building !== "yes" ? tags.building : undefined,
+      bc: tags["building:colour"] || tags["building:color"] || undefined,
+      rcTag: tags["roof:colour"] || tags["roof:color"] || undefined,
+      m: tags["building:material"] || undefined,
       p: ring,
     });
   }

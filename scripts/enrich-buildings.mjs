@@ -1,0 +1,356 @@
+/* Enriches data/cyberport-buildings.json with REAL per-building appearance:
+
+   1. Roof colour is MEASURED from the Lands Department orthophoto already in
+      data/imagery/ — the aerial photo literally contains each roof's pixels,
+      so every building ends up its true colour rather than a guess.
+   2. Facade colour comes from OSM building:colour / Overture facade_color
+      when mapped; otherwise it is derived from the measured roof colour and
+      the building's type/height (documented as inferred, not measured).
+   3. Heights are replaced by Overture Maps values when available (real
+      per-building heights merged from OSM + ML sources), keeping the OSM
+      height whenever it was explicitly mapped.
+
+   Run by .github/workflows/fetch-osm-data.yml after the fetch steps. */
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { PNG } from "pngjs";
+
+const BUILDINGS = "data/cyberport-buildings.json";
+const IMAGERY_DIR = "data/imagery";
+const OVERTURE = process.argv[2] || "overture-buildings.json";
+
+const data = JSON.parse(readFileSync(BUILDINGS, "utf8"));
+const buildings = data.buildings || [];
+
+/* ---------- tile pixel lookup (web mercator) ---------- */
+
+const manifest = existsSync(`${IMAGERY_DIR}/manifest.json`)
+  ? JSON.parse(readFileSync(`${IMAGERY_DIR}/manifest.json`, "utf8"))
+  : null;
+const SAMPLE_Z = manifest ? manifest.maxZoom : 17;
+const tileCache = new Map();
+
+function loadTile(z, x, y) {
+  const key = `${z}/${x}/${y}`;
+  if (tileCache.has(key)) return tileCache.get(key);
+  const file = `${IMAGERY_DIR}/${z}/${x}/${y}.png`;
+  let tile = null;
+  if (existsSync(file)) {
+    try {
+      tile = PNG.sync.read(readFileSync(file));
+    } catch (_) {
+      tile = null;
+    }
+  }
+  tileCache.set(key, tile);
+  return tile;
+}
+
+// Pixel at a geographic point, or null outside coverage.
+function samplePixel(lon, lat) {
+  const n = 2 ** SAMPLE_Z;
+  const rad = (lat * Math.PI) / 180;
+  const wx = ((lon + 180) / 360) * n * 256;
+  const wy =
+    ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n * 256;
+  const tile = loadTile(SAMPLE_Z, Math.floor(wx / 256), Math.floor(wy / 256));
+  if (!tile) return null;
+  const px = Math.floor(wx) % 256;
+  const py = Math.floor(wy) % 256;
+  const idx = (tile.width * py + px) << 2;
+  const a = tile.data[idx + 3];
+  if (a !== undefined && a < 200) return null; // transparent / no data
+  return [tile.data[idx], tile.data[idx + 1], tile.data[idx + 2]];
+}
+
+/* ---------- polygon helpers ---------- */
+
+function centroidOf(ring) {
+  let a = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[(i + 1) % ring.length];
+    const f = x1 * y2 - x2 * y1;
+    a += f;
+    cx += (x1 + x2) * f;
+    cy += (y1 + y2) * f;
+  }
+  if (Math.abs(a) < 1e-14) {
+    // Degenerate ring — fall back to the vertex average.
+    return [
+      ring.reduce((s, p) => s + p[0], 0) / ring.length,
+      ring.reduce((s, p) => s + p[1], 0) / ring.length,
+    ];
+  }
+  a *= 0.5;
+  return [cx / (6 * a), cy / (6 * a)];
+}
+
+function pointInRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/* ---------- colour utilities ---------- */
+
+const lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+const clamp255 = (v) => Math.max(0, Math.min(255, Math.round(v)));
+const toHex = (c) =>
+  "#" + c.map((v) => clamp255(v).toString(16).padStart(2, "0")).join("");
+
+function parseHex(str) {
+  if (typeof str !== "string") return null;
+  const named = {
+    white: [235, 235, 232], grey: [150, 150, 150], gray: [150, 150, 150],
+    black: [60, 60, 62], red: [150, 70, 60], brown: [130, 100, 80],
+    beige: [214, 200, 172], cream: [226, 214, 186], yellow: [214, 194, 130],
+    green: [110, 130, 105], blue: [110, 130, 160], silver: [178, 180, 182],
+    tan: [200, 180, 150], pink: [214, 180, 176], orange: [200, 140, 90],
+  };
+  const key = str.trim().toLowerCase();
+  if (named[key]) return named[key];
+  const m = key.match(/^#?([0-9a-f]{6})$/);
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/* Robust roof colour: sample a grid inside the footprint (shrunk toward the
+   centroid so edge pixels — ground, gutters, shadow cast onto neighbours —
+   don't pollute the reading), then average the interquartile band by
+   luminance. That rejects both deep shadow and blown-out highlights. */
+function measureRoofColour(ring) {
+  const [cx, cy] = centroidOf(ring);
+  const lons = ring.map((p) => p[0]);
+  const lats = ring.map((p) => p[1]);
+  const minLon = Math.min(...lons);
+  const maxLon = Math.max(...lons);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+
+  // Shrink 22% toward the centroid: keeps the sample on the roof proper.
+  const inner = ring.map(([x, y]) => [cx + (x - cx) * 0.78, cy + (y - cy) * 0.78]);
+
+  const STEPS = 14;
+  const samples = [];
+  for (let i = 0; i <= STEPS; i++) {
+    for (let j = 0; j <= STEPS; j++) {
+      const lon = minLon + ((maxLon - minLon) * i) / STEPS;
+      const lat = minLat + ((maxLat - minLat) * j) / STEPS;
+      if (!pointInRing(lon, lat, inner)) continue;
+      const px = samplePixel(lon, lat);
+      if (px) samples.push(px);
+    }
+  }
+  if (samples.length === 0) {
+    const px = samplePixel(cx, cy);
+    if (px) samples.push(px);
+  }
+  if (samples.length === 0) return null;
+
+  samples.sort((a, b) => lum(a) - lum(b));
+  const lo = Math.floor(samples.length * 0.25);
+  const hi = Math.max(lo + 1, Math.ceil(samples.length * 0.75));
+  const band = samples.slice(lo, hi);
+  const avg = [0, 1, 2].map((k) => band.reduce((s, c) => s + c[k], 0) / band.length);
+  return { colour: avg, samples: samples.length };
+}
+
+/* Facades: measured roofs tell us the building's palette, but a roof is not a
+   wall. Where the wall colour is actually mapped we use it; otherwise we move
+   the measured roof colour to a realistic facade tone.
+
+   The shift is ADDITIVE in luminance and DAMPED in chroma. Scaling RGB
+   multiplicatively (the obvious approach) amplifies saturation — a dark
+   slate-blue roof becomes neon cyan — whereas keeping the colour's distance
+   from grey roughly fixed while raising its lightness is what real paint,
+   render and curtain wall actually look like. */
+const FACADE_CHROMA = 0.45; // how much of the roof's colour cast the wall keeps
+const FACADE_CHROMA_CAP = 26; // max distance from neutral, per channel
+
+function deriveFacade(roof, b) {
+  const tagged = parseHex(b.bc) || parseHex(b.facadeColor);
+  if (tagged) return tagged;
+  if (!roof) return b.h > 90 ? [156, 162, 170] : [208, 200, 188];
+
+  const glassy = b.h > 90 || b.m === "glass" || b.t === "office";
+  // Deterministic per-building nudge so neighbours never look cloned.
+  const seed = Math.abs(Math.sin(b.p[0][0] * 4321.7 + b.p[0][1] * 1234.3));
+  const target = (glassy ? 158 : 198) + (seed - 0.5) * 26;
+
+  const g = lum(roof);
+  let c = roof.map((v) => {
+    const chroma = Math.max(-FACADE_CHROMA_CAP, Math.min(FACADE_CHROMA_CAP, (v - g) * FACADE_CHROMA));
+    return target + chroma;
+  });
+  // Material tint: curtain wall cools, painted render warms.
+  c = glassy ? [c[0] - 6, c[1] - 1, c[2] + 8] : [c[0] + 7, c[1] + 1, c[2] - 7];
+  return c;
+}
+
+/* ---------- Overture heights (best effort) ---------- */
+
+let overture = [];
+if (existsSync(OVERTURE)) {
+  try {
+    const raw = readFileSync(OVERTURE, "utf8").trim();
+    if (raw) {
+      overture = raw
+        .split("\n")
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch (_) {
+            return null;
+          }
+        })
+        .filter((o) => o && Number.isFinite(o.lon) && Number.isFinite(o.lat));
+    }
+  } catch (_) {
+    overture = [];
+  }
+}
+console.log(`overture records: ${overture.length}`);
+
+// Metres per degree at Cyberport, for centroid matching.
+const M_PER_DEG_LAT = 110574;
+const M_PER_DEG_LON = 111320 * Math.cos((22.26 * Math.PI) / 180);
+
+function nearestOverture(cx, cy) {
+  let best = null;
+  let bestD = Infinity;
+  for (const o of overture) {
+    const dx = (o.lon - cx) * M_PER_DEG_LON;
+    const dy = (o.lat - cy) * M_PER_DEG_LAT;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) {
+      bestD = d;
+      best = o;
+    }
+  }
+  return bestD <= 20 * 20 ? best : null; // within 20 m
+}
+
+/* ---------- enrich ---------- */
+
+let measured = 0;
+let noPixels = 0;
+let heightsFromOverture = 0;
+let taggedColours = 0;
+
+/* Pass 1 — merge Overture attributes and measure raw roof colour. */
+const raw = new Map();
+for (const b of buildings) {
+  const [cx, cy] = centroidOf(b.p);
+
+  const o = overture.length ? nearestOverture(cx, cy) : null;
+  if (o) {
+    if (o.facade_color) b.facadeColor = o.facade_color;
+    if (o.roof_color) b.rcTag = b.rcTag || o.roof_color;
+    const oh = Number(o.height) || (Number(o.num_floors) ? Number(o.num_floors) * 3.1 + 2 : 0);
+    // Overture wins over our estimate; a mapped OSM height wins over Overture.
+    if (oh > 2 && oh < 500 && b.hs !== "tag") {
+      b.h = Math.round(oh * 10) / 10;
+      b.hs = "overture";
+      heightsFromOverture++;
+    }
+  }
+
+  if (parseHex(b.rcTag)) continue; // mapped colour needs no measurement
+  const m = measureRoofColour(b.p);
+  if (m) {
+    raw.set(b, m.colour);
+    measured++;
+  } else {
+    noPixels++;
+  }
+}
+
+/* Aerial photography carries a strong colour cast (atmospheric haze over the
+   harbour pushes everything blue-green) and reads dark. Across a thousand
+   rooftops the true average is close to neutral grey, so the deviation of the
+   measured average IS the cast — correct it out, grey-world style, then set
+   exposure from the median. Gains are clamped so a genuinely tinted district
+   can't be over-corrected into a different palette. */
+const all = [...raw.values()];
+const gains = [1, 1, 1];
+let exposure = 1;
+if (all.length > 20) {
+  const means = [0, 1, 2].map((k) => all.reduce((s, c) => s + c[k], 0) / all.length);
+  const grey = (means[0] + means[1] + means[2]) / 3;
+  for (let k = 0; k < 3; k++) {
+    gains[k] = Math.max(0.82, Math.min(1.25, grey / Math.max(means[k], 1)));
+  }
+  const lums = all
+    .map((c) => lum([c[0] * gains[0], c[1] * gains[1], c[2] * gains[2]]))
+    .sort((a, b) => a - b);
+  const median = lums[Math.floor(lums.length / 2)];
+  exposure = Math.max(0.9, Math.min(1.75, 128 / Math.max(median, 1)));
+}
+const correct = (c) => [
+  c[0] * gains[0] * exposure,
+  c[1] * gains[1] * exposure,
+  c[2] * gains[2] * exposure,
+];
+console.log(
+  `white balance gains=${gains.map((g) => g.toFixed(3)).join("/")} exposure=${exposure.toFixed(3)}`
+);
+
+// Neutral stand-in for the handful of roofs with no usable pixels: the
+// corrected average of everything that was measured.
+const fallbackRoof =
+  all.length > 20
+    ? correct([0, 1, 2].map((k) => all.reduce((s, c) => s + c[k], 0) / all.length))
+    : [168, 166, 160];
+
+/* Pass 2 — apply the correction and derive facades. */
+for (const b of buildings) {
+  const tagRoof = parseHex(b.rcTag);
+  let roof = null;
+  if (tagRoof) {
+    roof = tagRoof;
+    taggedColours++;
+  } else if (raw.has(b)) {
+    roof = correct(raw.get(b));
+  }
+
+  const facade = deriveFacade(roof, b);
+  b.rc = toHex(roof || fallbackRoof);
+  b.fc = toHex(facade);
+  b.cs = tagRoof ? "tag" : roof ? "photo" : "default"; // colour source
+
+  // Tag-only fields have served their purpose.
+  delete b.bc;
+  delete b.rcTag;
+  delete b.m;
+  delete b.facadeColor;
+}
+
+data.buildings = buildings;
+data.appearance = {
+  roofColours: "measured from Lands Department orthophoto (data/imagery)",
+  facadeColours: "OSM/Overture where mapped, otherwise derived from measured roof colour",
+  heights: "OSM mapped height/levels, else Overture Maps, else estimated",
+};
+data.generatedAppearance = new Date().toISOString();
+writeFileSync(BUILDINGS, JSON.stringify(data));
+
+const byHeight = {};
+for (const b of buildings) byHeight[b.hs] = (byHeight[b.hs] || 0) + 1;
+console.log(
+  `buildings=${buildings.length} roofColourMeasured=${measured} ` +
+    `taggedColour=${taggedColours} noPixels=${noPixels} ` +
+    `overtureHeights=${heightsFromOverture} heightSources=${JSON.stringify(byHeight)}`
+);
+if (measured + taggedColours < buildings.length * 0.5) {
+  console.error("Fewer than half the buildings got a real colour — check imagery.");
+  process.exit(1);
+}

@@ -57,6 +57,42 @@ jobs:
       - name: Fetch HK Gov aerial imagery tiles
         run: node scripts/fetch-imagery.mjs
 
+      # Best effort: real per-building heights (and mapped colours) from
+      # Overture Maps' public parquet. If the query fails or the release
+      # layout moves, enrichment simply falls back to OSM heights.
+      - name: Fetch Overture building heights
+        continue-on-error: true
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          curl -sSL --max-time 180 -o duckdb.zip \
+            https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip
+          unzip -o -q duckdb.zip
+          chmod +x ./duckdb
+          REL=$(./duckdb -noheader -list -c \
+            "INSTALL httpfs; LOAD httpfs; SET s3_region='us-west-2';
+             SELECT file FROM glob('s3://overturemaps-us-west-2/release/*')
+             ORDER BY file DESC LIMIT 1;")
+          echo "Overture release: $REL"
+          [ -n "$REL" ]
+          ./duckdb -c "
+            INSTALL httpfs; LOAD httpfs; SET s3_region='us-west-2';
+            COPY (
+              SELECT
+                (bbox.xmin + bbox.xmax) / 2 AS lon,
+                (bbox.ymin + bbox.ymax) / 2 AS lat,
+                height, num_floors, roof_color, facade_color, roof_shape
+              FROM read_parquet('${REL}/theme=buildings/type=building/*', hive_partitioning=1)
+              WHERE bbox.xmin BETWEEN 114.110 AND 114.150
+                AND bbox.ymin BETWEEN 22.243 AND 22.279
+            ) TO 'overture-buildings.json' (FORMAT JSON);"
+          wc -l overture-buildings.json
+
+      - name: Measure real building colours from the orthophoto
+        run: |
+          npm install pngjs@7 --no-save --no-audit --no-fund
+          node scripts/enrich-buildings.mjs overture-buildings.json
+
       - name: Commit data
         run: |
           set -euo pipefail
