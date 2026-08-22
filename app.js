@@ -205,6 +205,9 @@ const BOOKMARKS = [
   // Real topography for the Cyberport area, baked from AWS Terrain Tiles into
   // data/terrain.json (see scripts/fetch-terrain.mjs). Without this the whole
   // district renders as a flat plane with the hillside merely painted on.
+  let terrainSample = () => 0; // set once the baked grid loads
+  let terrainReadyPromise = Promise.resolve();
+
   async function initTerrain() {
     let t;
     try {
@@ -241,6 +244,8 @@ const BOOKMARKS = [
       const bot = grid[y1 * n + x0] * (1 - tx) + grid[y1 * n + x1] * tx;
       return top * (1 - ty) + bot * ty;
     };
+
+    terrainSample = sample;
 
     const SIZE = 64; // heightmap samples per tile edge
     const tilingScheme = new Cesium.GeographicTilingScheme();
@@ -555,67 +560,99 @@ void main()
   }
 
   /* Roads: every OSM-mapped highway, at its real width (lanes where
-     tagged), draped onto the terrain as classification geometry so they
-     follow the hillside. Main roads get a pale centre-line stripe. */
+     tagged), built as thin solid ribbons whose heights come from the baked
+     terrain grid, chunked so they follow the hillside. (Terrain
+     classification looked ideal for this but leaks colour through cracks
+     between custom-heightmap tiles, which render as streaks.) */
   function createRoadPrimitives(roadList) {
-    if (!Cesium.GroundPrimitive.isSupported(scene)) return [];
     const roadInstances = [];
     const stripeInstances = [];
+
+    // Split a way into chunks that stay within ~2 m of elevation change,
+    // so each chunk can be one flat corridor at its local ground level.
+    function chunksOf(points) {
+      const out = [];
+      let chunk = [points[0]];
+      let g0 = terrainSample(points[0][0], points[0][1]);
+      let lo = g0;
+      let hi = g0;
+      for (let i = 1; i < points.length; i++) {
+        const g = terrainSample(points[i][0], points[i][1]);
+        lo = Math.min(lo, g);
+        hi = Math.max(hi, g);
+        chunk.push(points[i]);
+        if (hi - lo > 2 && chunk.length >= 2) {
+          out.push({ pts: chunk, ground: (lo + hi) / 2 });
+          chunk = [points[i]];
+          lo = g;
+          hi = g;
+        }
+      }
+      if (chunk.length >= 2) out.push({ pts: chunk, ground: (lo + hi) / 2 });
+      return out;
+    }
+
     for (const r of roadList) {
       if (!Array.isArray(r.p) || r.p.length < 2) continue;
-      const flat = [];
-      for (const pt of r.p) flat.push(pt[0], pt[1]);
-      const positions = Cesium.Cartesian3.fromDegreesArray(flat);
       const seed = Math.abs(Math.sin(r.p[0][0] * 3517.9 + r.p[0][1] * 2741.3));
       let c;
       if (r.k === 0) {
-        c = new Cesium.Color(0.78 + 0.05 * seed, 0.755 + 0.05 * seed, 0.70 + 0.05 * seed, 1);
+        c = new Cesium.Color(0.76 + 0.05 * seed, 0.735 + 0.05 * seed, 0.68 + 0.05 * seed, 1);
       } else {
         const g = 0.235 + 0.05 * seed + (r.k === 2 ? -0.02 : 0);
         c = new Cesium.Color(g, g + 0.012, g + 0.028, 1);
       }
-      try {
-        roadInstances.push(
-          new Cesium.GeometryInstance({
-            geometry: new Cesium.CorridorGeometry({
-              positions,
-              width: r.w,
-              vertexFormat: Cesium.VertexFormat.POSITION_ONLY,
-            }),
-            attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(c) },
-          })
-        );
-        if (r.k === 2) {
-          stripeInstances.push(
+      const colorAttr = Cesium.ColorGeometryInstanceAttribute.fromColor(c);
+      for (const chunk of chunksOf(r.p)) {
+        const flat = [];
+        for (const pt of chunk.pts) flat.push(pt[0], pt[1]);
+        const positions = Cesium.Cartesian3.fromDegreesArray(flat);
+        const top = chunk.ground + 0.35;
+        try {
+          roadInstances.push(
             new Cesium.GeometryInstance({
               geometry: new Cesium.CorridorGeometry({
                 positions,
-                width: 0.35,
-                vertexFormat: Cesium.VertexFormat.POSITION_ONLY,
+                width: r.w,
+                height: top,
+                extrudedHeight: chunk.ground - 2.5, // solid slab sunk into ground
+                vertexFormat: Cesium.PerInstanceColorAppearance.FLAT_VERTEX_FORMAT,
               }),
-              attributes: {
-                color: Cesium.ColorGeometryInstanceAttribute.fromColor(
-                  new Cesium.Color(0.85, 0.84, 0.78, 1)
-                ),
-              },
+              attributes: { color: colorAttr },
             })
           );
+          if (r.k === 2) {
+            stripeInstances.push(
+              new Cesium.GeometryInstance({
+                geometry: new Cesium.CorridorGeometry({
+                  positions,
+                  width: 0.35,
+                  height: top + 0.06,
+                  vertexFormat: Cesium.PerInstanceColorAppearance.FLAT_VERTEX_FORMAT,
+                }),
+                attributes: {
+                  color: Cesium.ColorGeometryInstanceAttribute.fromColor(
+                    new Cesium.Color(0.85, 0.84, 0.78, 1)
+                  ),
+                },
+              })
+            );
+          }
+        } catch (_) {
+          /* skip a degenerate chunk */
         }
-      } catch (_) {
-        /* skip a degenerate way */
       }
     }
     const make = (instances) =>
-      new Cesium.GroundPrimitive({
+      new Cesium.Primitive({
         geometryInstances: instances,
         appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: false }),
-        classificationType: Cesium.ClassificationType.TERRAIN,
         asynchronous: true,
         allowPicking: false,
       });
     const out = [];
     if (roadInstances.length) out.push(make(roadInstances));
-    if (stripeInstances.length) out.push(make(stripeInstances)); // added after: draws on top
+    if (stripeInstances.length) out.push(make(stripeInstances));
     return out;
   }
 
@@ -696,6 +733,9 @@ void main()
       asynchronous: true,
       allowPicking: false,
     });
+    try {
+      await terrainReadyPromise; // roads take their heights from the grid
+    } catch (_) {}
     const extras = Array.isArray(data.roads) ? createRoadPrimitives(data.roads) : [];
     const trees = Array.isArray(data.trees) ? createTreesPrimitive(data.trees) : null;
     if (trees) extras.push(trees);
@@ -1406,7 +1446,7 @@ void main()
     if (!hasHkKey) markUnavailable("hk", "API key missing");
     updateSourceButtons();
     applyMode(null);
-    initTerrain();
+    terrainReadyPromise = initTerrain();
     initImagery().then(initLocalAerial); // aerial layer drapes above the base
 
     let flown = false;
