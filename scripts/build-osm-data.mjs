@@ -81,6 +81,25 @@ function resolveWayGeometry(way) {
 const buildings = [];
 let skipped = 0;
 
+// Real roads: OSM highway ways with widths from lanes/class.
+const roads = [];
+const ROAD_CLASS = {
+  motorway: [2, 16], trunk: [2, 14], primary: [2, 11], secondary: [2, 9],
+  tertiary: [2, 8], residential: [1, 6], unclassified: [1, 6], living_street: [1, 5],
+  service: [1, 4.5], track: [1, 3.5], pedestrian: [0, 4], footway: [0, 2],
+  path: [0, 1.8], cycleway: [0, 2.2], steps: [0, 2],
+};
+
+function lineFromGeometry(geometry) {
+  if (!Array.isArray(geometry) || geometry.length < 2) return null;
+  const pts = geometry.map((g) => [round(g.lon), round(g.lat)]);
+  const inside = pts.some(
+    ([lon, lat]) =>
+      lat >= BBOX.south && lat <= BBOX.north && lon >= BBOX.west && lon <= BBOX.east
+  );
+  return inside ? pts : null;
+}
+
 // Real mapped trees and green areas (parks/woods) for the tree layer.
 const trees = [];
 const green = [];
@@ -98,6 +117,19 @@ for (const el of raw.elements || []) {
       el.lon >= BBOX.west && el.lon <= BBOX.east
     ) {
       trees.push([round(el.lon), round(el.lat)]);
+    }
+    continue;
+  }
+  if (el.type === "way" && ROAD_CLASS[tags.highway] && tags.tunnel !== "yes" && tags.area !== "yes") {
+    const line = lineFromGeometry(resolveWayGeometry(el));
+    if (line) {
+      const [k, defW] = ROAD_CLASS[tags.highway];
+      const lanes = Number(tags.lanes);
+      const w =
+        Number.isFinite(lanes) && lanes > 0 && lanes < 12 && k > 0
+          ? Math.max(defW * 0.6, lanes * 3.2)
+          : defW;
+      roads.push({ k, w: Math.round(w * 10) / 10, p: line });
     }
     continue;
   }
@@ -157,12 +189,13 @@ const out = {
   buildings,
   trees,
   green,
+  roads,
 };
 
 mkdirSync("data", { recursive: true });
 writeFileSync("data/cyberport-buildings.json", JSON.stringify(out));
 
-console.log(`mappedTrees=${trees.length} greenAreas=${green.length}`);
+console.log(`mappedTrees=${trees.length} greenAreas=${green.length} roads=${roads.length}`);
 const named = buildings.filter((b) => b.n).length;
 const tallest = buildings[0];
 console.log(

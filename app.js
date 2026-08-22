@@ -554,6 +554,71 @@ void main()
     });
   }
 
+  /* Roads: every OSM-mapped highway, at its real width (lanes where
+     tagged), draped onto the terrain as classification geometry so they
+     follow the hillside. Main roads get a pale centre-line stripe. */
+  function createRoadPrimitives(roadList) {
+    if (!Cesium.GroundPrimitive.isSupported(scene)) return [];
+    const roadInstances = [];
+    const stripeInstances = [];
+    for (const r of roadList) {
+      if (!Array.isArray(r.p) || r.p.length < 2) continue;
+      const flat = [];
+      for (const pt of r.p) flat.push(pt[0], pt[1]);
+      const positions = Cesium.Cartesian3.fromDegreesArray(flat);
+      const seed = Math.abs(Math.sin(r.p[0][0] * 3517.9 + r.p[0][1] * 2741.3));
+      let c;
+      if (r.k === 0) {
+        c = new Cesium.Color(0.78 + 0.05 * seed, 0.755 + 0.05 * seed, 0.70 + 0.05 * seed, 1);
+      } else {
+        const g = 0.235 + 0.05 * seed + (r.k === 2 ? -0.02 : 0);
+        c = new Cesium.Color(g, g + 0.012, g + 0.028, 1);
+      }
+      try {
+        roadInstances.push(
+          new Cesium.GeometryInstance({
+            geometry: new Cesium.CorridorGeometry({
+              positions,
+              width: r.w,
+              vertexFormat: Cesium.VertexFormat.POSITION_ONLY,
+            }),
+            attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(c) },
+          })
+        );
+        if (r.k === 2) {
+          stripeInstances.push(
+            new Cesium.GeometryInstance({
+              geometry: new Cesium.CorridorGeometry({
+                positions,
+                width: 0.35,
+                vertexFormat: Cesium.VertexFormat.POSITION_ONLY,
+              }),
+              attributes: {
+                color: Cesium.ColorGeometryInstanceAttribute.fromColor(
+                  new Cesium.Color(0.85, 0.84, 0.78, 1)
+                ),
+              },
+            })
+          );
+        }
+      } catch (_) {
+        /* skip a degenerate way */
+      }
+    }
+    const make = (instances) =>
+      new Cesium.GroundPrimitive({
+        geometryInstances: instances,
+        appearance: new Cesium.PerInstanceColorAppearance({ flat: true, translucent: false }),
+        classificationType: Cesium.ClassificationType.TERRAIN,
+        asynchronous: true,
+        allowPicking: false,
+      });
+    const out = [];
+    if (roadInstances.length) out.push(make(roadInstances));
+    if (stripeInstances.length) out.push(make(stripeInstances)); // added after: draws on top
+    return out;
+  }
+
   async function createOsmBuildings() {
     const resp = await fetch("data/cyberport-buildings.json");
     if (!resp.ok) {
@@ -631,8 +696,10 @@ void main()
       asynchronous: true,
       allowPicking: false,
     });
+    const extras = Array.isArray(data.roads) ? createRoadPrimitives(data.roads) : [];
     const trees = Array.isArray(data.trees) ? createTreesPrimitive(data.trees) : null;
-    return { primitive: buildings, extras: trees ? [trees] : [] };
+    if (trees) extras.push(trees);
+    return { primitive: buildings, extras };
   }
 
   function createTileset(key) {

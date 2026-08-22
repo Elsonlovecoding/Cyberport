@@ -23,7 +23,7 @@ jobs:
       - name: Query OpenStreetMap
         run: |
           set -euo pipefail
-          QUERY='[out:json][timeout:120];(way["building"](22.248,114.115,22.274,114.145);relation["building"](22.248,114.115,22.274,114.145);node["natural"="tree"](22.248,114.115,22.274,114.145);way["leisure"~"^(park|garden)$"](22.248,114.115,22.274,114.145);way["natural"~"^(wood|scrub)$"](22.248,114.115,22.274,114.145);way["landuse"~"^(grass|forest|recreation_ground|village_green|meadow)$"](22.248,114.115,22.274,114.145););out geom qt;'
+          QUERY='[out:json][timeout:120];(way["building"](22.248,114.115,22.274,114.145);relation["building"](22.248,114.115,22.274,114.145);node["natural"="tree"](22.248,114.115,22.274,114.145);way["highway"](22.248,114.115,22.274,114.145);way["leisure"~"^(park|garden)$"](22.248,114.115,22.274,114.145);way["natural"~"^(wood|scrub)$"](22.248,114.115,22.274,114.145);way["landuse"~"^(grass|forest|recreation_ground|village_green|meadow)$"](22.248,114.115,22.274,114.145););out geom qt;'
           for round in 1 2 3; do
             for endpoint in \
               "https://overpass-api.de/api/interpreter" \
